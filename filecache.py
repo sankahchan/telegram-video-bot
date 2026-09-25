@@ -12,11 +12,17 @@ DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(DATA_DIR, "fileid_cache.json")
 TTL_SECONDS = 30 * 86400  # 30 days
 
+# Bump when the download/process pipeline changes its output (e.g. v5.4.6
+# H.264 normalization) so stale file_ids are never re-served: a repeat
+# link re-downloads once instead of replaying the old file.
+CACHE_VERSION = "v546"
+
 
 def make_key(*parts) -> str:
-    """Cache key = sha1 of the normalized parts."""
+    """Cache key = sha1 of version + normalized parts."""
     norm = "|".join(str(p).strip().lower() for p in parts)
-    return hashlib.sha1(norm.encode("utf-8")).hexdigest()
+    return hashlib.sha1(
+        f"{CACHE_VERSION}|{norm}".encode("utf-8")).hexdigest()
 
 
 class FileIdCache:

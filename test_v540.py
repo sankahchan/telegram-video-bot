@@ -16,7 +16,7 @@ from x_media import (
     syndication_token, _best_variant, _parse_fx_media,
     _parse_syndication_media, _classify_error, XMediaError,
 )
-from filecache import FileIdCache, make_key
+from filecache import CACHE_VERSION, FileIdCache, make_key
 
 PASS = []
 
@@ -118,7 +118,9 @@ tmp = tempfile.mkdtemp()
 try:
     c = FileIdCache(path=os.path.join(tmp, "c.json"))
     k1 = make_key("web", "https://x.com/a", "high", "video")
-    check("key sha1", k1 == hashlib.sha1(b"web|https://x.com/a|high|video").hexdigest())
+    check("key sha1", k1 == hashlib.sha1(
+        f"{CACHE_VERSION}|web|https://x.com/a|high|video".encode("utf-8")
+    ).hexdigest())
     check("key differs", make_key("web", "https://x.com/a", "low", "video") != k1)
     check("get miss", c.get(k1) is None)
     c.set(k1, "FILEID123", "video", "cap")
