@@ -41,8 +41,9 @@ from telegram.ext import (
 
 def _env(name: str, default: str = "") -> str:
     # systemd EnvironmentFile doesn't strip quotes, so a value like
-    # ALLOWED_USER_IDS="123" would arrive literally with quotes -> strip them
-    return os.environ.get(name, default).strip().strip('"').strip("'").strip()
+    # ALLOWED_USER_IDS="123" would arrive literally with quotes -> strip them.
+    # Also strip Unicode "smart quotes" (Mac/iPhone autocorrect " -> " " etc.)
+    return os.environ.get(name, default).strip().strip("\"'“”‘’").strip()
 
 
 API_ID = int(_env("API_ID", "0") or 0)
@@ -64,8 +65,9 @@ if not all([API_ID, API_HASH, BOT_TOKEN, SESSION_STRING]):
     )
 
 # Bot ကို ဒီ user ID တွေပဲ သုံးလို့ရမယ် (သူစိမ်းတွေ သုံးမရအောင်)
+# re.findall(r"\d+"): quote/smart-quote/space စတဲ့ အမှိုက်မှန်သမျှ ခံနိုင်ရည်ရှိအောင် ဂဏန်းပဲ ဆွဲထုတ်
 _raw_ids = _env("ALLOWED_USER_IDS")
-ALLOWED_IDS = {int(x) for x in _raw_ids.split(",") if x.strip()}
+ALLOWED_IDS = {int(x) for x in re.findall(r"\d+", _raw_ids)}
 if not ALLOWED_IDS:
     ALLOWED_IDS = {1180438393}  # default: owner
 
