@@ -39,10 +39,16 @@ from telegram.ext import (
     filters as tg_filters,
 )
 
-API_ID = int(os.environ.get("API_ID", "0") or 0)
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
+def _env(name: str, default: str = "") -> str:
+    # systemd EnvironmentFile doesn't strip quotes, so a value like
+    # ALLOWED_USER_IDS="123" would arrive literally with quotes -> strip them
+    return os.environ.get(name, default).strip().strip('"').strip("'").strip()
+
+
+API_ID = int(_env("API_ID", "0") or 0)
+API_HASH = _env("API_HASH")
+BOT_TOKEN = _env("BOT_TOKEN")
+SESSION_STRING = _env("SESSION_STRING")
 
 if not SESSION_STRING:
     try:
@@ -58,7 +64,7 @@ if not all([API_ID, API_HASH, BOT_TOKEN, SESSION_STRING]):
     )
 
 # Bot ကို ဒီ user ID တွေပဲ သုံးလို့ရမယ် (သူစိမ်းတွေ သုံးမရအောင်)
-_raw_ids = os.environ.get("ALLOWED_USER_IDS", "").strip()
+_raw_ids = _env("ALLOWED_USER_IDS")
 ALLOWED_IDS = {int(x) for x in _raw_ids.split(",") if x.strip()}
 if not ALLOWED_IDS:
     ALLOWED_IDS = {1180438393}  # default: owner
@@ -67,7 +73,7 @@ MAX_BATCH = 10
 
 # Parallel download connections (1MB chunk တစ်ခုကို connection တစ်ခုစီ)
 # မြင့်လေ မြန်လေ — ဒါပေမယ့် 16 ထက် မကျော်သင့်ဘူး
-DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", "8") or 8)
+DOWNLOAD_WORKERS = int(_env("DOWNLOAD_WORKERS", "8") or 8)
 
 # user_id -> "video" | "file"  (ပို့မယ့်ပုံစံ)
 user_modes = {}

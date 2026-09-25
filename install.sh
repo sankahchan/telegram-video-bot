@@ -63,12 +63,13 @@ read -rp "ALLOWED_USER_IDS (သင့် Telegram ID — @userinfobot မှာ 
 ALLOWED_IDS="${ALLOWED_IDS:-}"
 
 # .env အရင်ရေး (generate_session.py က API_ID/API_HASH ကို .env ကနေ ဖတ်မယ်)
+# NOTE: quote မပါဘဲ ရေး — systemd EnvironmentFile က quote ကို မဖယ်ဘူး
 cat > .env <<EOF
-API_ID="$API_ID"
-API_HASH="$API_HASH"
-BOT_TOKEN="$BOT_TOKEN"
-SESSION_STRING=""
-ALLOWED_USER_IDS="$ALLOWED_IDS"
+API_ID=$API_ID
+API_HASH=$API_HASH
+BOT_TOKEN=$BOT_TOKEN
+SESSION_STRING=
+ALLOWED_USER_IDS=$ALLOWED_IDS
 EOF
 chmod 600 .env
 
