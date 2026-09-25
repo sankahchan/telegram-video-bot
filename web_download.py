@@ -195,6 +195,21 @@ async def probe_size(url: str):
         return None
 
 
+# YouTube errors worth retrying with the next client/format — often transient
+# or client-specific (flagged IP, missing PO token, rate limit...)
+_RETRYABLE_YT = (
+    "Requested format is not available",
+    "The page needs to be reloaded",
+    "try again later",
+    "HTTP Error 429",
+)
+
+
+def _retryable_yt_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return any(k.lower() in s for k in _RETRYABLE_YT)
+
+
 async def _diagnose_formats(url: str) -> str:
     """Probe video info (no download) to explain an empty format list."""
     def _run():
@@ -276,27 +291,30 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     # download happens when formats are empty).
     client_variants = [["android"], ["web"], ["tvhtml5"]]
     result = None
+    last_err: Exception | None = None
     for ci, clients in enumerate(client_variants):
         for i, fmt in enumerate(fmts):
             try:
                 result = await asyncio.to_thread(_run, fmt, clients)
                 break
             except Exception as e:
-                if "Requested format is not available" not in str(e):
+                last_err = e
+                if not _retryable_yt_error(e):
                     raise
                 if i < len(fmts) - 1:
-                    print(f"⚠️ format '{fmt}' မရပါ — fallback '{fmts[i+1]}' နဲ့ ပြန်စမ်းမယ်")
+                    print(f"⚠️ [{clients}] '{fmt}' fail — fallback '{fmts[i+1]}'")
                     continue
                 if ci < len(client_variants) - 1:
-                    print(f"⚠️ client {clients} format မပေးပါ — "
-                          f"client {client_variants[ci+1]} နဲ့ ပြန်စမ်းမယ်")
+                    print(f"⚠️ [{clients}] fail — client {client_variants[ci+1]} retry")
                 break
         if result:
             break
     if not result:
-        # every client returned zero formats — diagnose the real cause
+        # every client failed — diagnose the real cause
         diag = await _diagnose_formats(url)
-        raise RuntimeError(f"Requested format is not available || {diag}")
+        raise RuntimeError(
+            f"Requested format is not available || {diag} "
+            f"|| last: {str(last_err)[:200] if last_err else '?'}")
     path, title = result
     if not path or not os.path.exists(path):
         raise RuntimeError("download ပြီးပေမယ့် file မတွေ့ပါ")

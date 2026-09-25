@@ -424,7 +424,8 @@ def friendly_web_error(e: Exception) -> str | None:
             "ဖြစ်နိုင်ချေများ:\n"
             "• yt-dlp version အဟောင်း — VPS မှာ update.sh ပြန် run ပေးပါ\n"
             "  (bash /opt/tg-video-bot/update.sh)\n"
-            "• video က age-restricted / region-blocked / members-only"
+            "• video က age-restricted / region-blocked / members-only\n"
+            "• VPS IP ကို YouTube က ခဏ limit လုပ်ထားနိုင် — ခဏကြာမှ ပြန်စမ်းပါ"
             + extra +
             "\n\n"
             "YouTube isn't offering a downloadable format for this video. "
