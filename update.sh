@@ -1,0 +1,22 @@
+#!/bin/bash
+# Bot update: GitHub က code အသစ် pull → deps update → restart
+# Usage (VPS ပေါ် root နဲ့): bash /opt/tg-video-bot/update.sh
+set -euo pipefail
+
+INSTALL_DIR="/opt/tg-video-bot"
+SERVICE_NAME="tg-video-bot"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "❌ root နဲ့ run ပါ: sudo bash $INSTALL_DIR/update.sh"
+  exit 1
+fi
+
+cd "$INSTALL_DIR"
+echo "📥 GitHub ကနေ အသစ်ဆွဲနေပါတယ်..."
+git pull --ff-only
+echo "📚 Dependencies update..."
+./venv/bin/pip install -q -r requirements.txt
+echo "🔄 Restart..."
+systemctl restart "$SERVICE_NAME"
+sleep 2
+systemctl is-active -q "$SERVICE_NAME" && echo "✅ Bot run နေပါပြီ." || echo "⚠️ Service စမရပါ: journalctl -u $SERVICE_NAME -f"

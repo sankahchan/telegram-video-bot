@@ -1,0 +1,14 @@
+# Secrets — GitHub ပေါ် လုံးဝမတင်ရ
+.env
+session_string.txt
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+venv/
+*.pyc
+
+# OS / misc
+.DS_Store
+*.zip
