@@ -1,5 +1,9 @@
 # 📥 Telegram Restricted Media Downloader Bot
 
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![VPS 24/7](https://img.shields.io/badge/VPS-24%2F7-orange)
+
 Download restricted Telegram videos/photos/files through **your own account session** and receive them via your bot.
 
 သင့် Telegram account session ကနေ restricted media တွေကို download လုပ်ပြီး bot ကနေ ပြန်ပို့ပေးမယ်။
