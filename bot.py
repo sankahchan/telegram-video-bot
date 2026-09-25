@@ -706,14 +706,20 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 QUALITY_PROMPT_TTL = 600  # seconds
 
 
-def _needs_quality_prompt(jobs) -> bool:
-    """True when the batch may contain video (quality choice matters)."""
+def _prompt_needed(jobs, tg_cache) -> bool:
+    """True when the batch actually contains a video (quality choice matters).
+
+    Telegram messages are pre-fetched into tg_cache so PDFs/documents etc.
+    skip the prompt instead of asking blindly.
+    """
     for kind, ref in jobs:
         if kind == "tg":
-            return True  # kind unknown until fetched — usually video
-        if not looks_like_direct_file(ref):
+            m = tg_cache.get(ref)
+            if m is not None and media_kind(m) == "video":
+                return True
+        elif not looks_like_direct_file(ref):
             return True  # YouTube/TikTok/... -> video
-        if direct_file_kind(ref) == "video":
+        elif direct_file_kind(ref) == "video":
             return True  # direct .mp4 etc.
     return False
 
@@ -1007,8 +1013,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         jobs = jobs[:MAX_BATCH]
 
-    # Quality prompt — link ပို့တိုင်း Low/High မေး (ဒီတစ်ခါစာပဲ)
-    if prompt and _needs_quality_prompt(jobs):
+    # Telegram message တွေကို prompt မပြခင် ကြို fetch —
+    # video အစစ်ပါမှသာ Low/High မေးမယ် (PDF/document တွေ prompt ကျော်မယ်).
+    # Callback re-entry (prompt=False) မှာ cache လွတ်နေလို့ အသစ် fetch မယ်.
+    tg_cache = {}
+    if prompt:
+        for kind, ref in jobs:
+            if kind == "tg" and ref not in tg_cache:
+                msg, _, _ = await fetch_message(ref[0], ref[1])
+                tg_cache[ref] = msg if (msg and media_of(msg)) else None
+
+    # Quality prompt — video အစစ်ပါမှ Low/High မေး (ဒီတစ်ခါစာပဲ)
+    if prompt and _prompt_needed(jobs, tg_cache):
         token = uuid.uuid4().hex[:8]
         prev = pending_quality.get(uid)
         pending_quality[uid] = {
@@ -1055,7 +1071,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     cid, mid = ref
                     await status.edit_text(f"{tag} ရှာနေပါတယ်...")
                     print(f"📩 tg link from {uid}: chat={cid} msg={mid}")
-                    msg, _, err = await fetch_message(cid, mid)
+                    msg = tg_cache.get(ref)
+                    err = None
+                    if msg is None:
+                        # prompt ကျော်လာတာ (callback) သို့မဟုတ် pre-fetch မအောင်တာ
+                        msg, _, err = await fetch_message(cid, mid)
                     if not msg:
                         fail += 1
                         await emsg.reply_text(f"❌ {tag} မရပါ.\n{err}")

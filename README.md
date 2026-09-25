@@ -23,7 +23,7 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 👥 `/adduser` `/deluser` `/users` — multi-user (owner only)
 - 👁️ `/watch` — auto-download new posts from channels (checks every 5 min)
 - 📶 Live download progress %
-- 🗜️ `/quality high|low` — low = compressed 720p (saves bandwidth). The bot also asks **Low/High on every link** you send (per-download choice)
+- 🗜️ `/quality high|low` — low = compressed 720p (saves bandwidth). The bot also asks **Low/High per download** for video links (Telegram video / YouTube / direct .mp4); PDFs and other non-video files skip the prompt
 - 📖 `/help <command>` — detailed usage + examples for each command (e.g. `/help quality`)
 - 💾 `/save` — also save a copy to your Saved Messages
 - 🌙 `/nightmode` — queue big files (>100MB) for night download (KST hour)
