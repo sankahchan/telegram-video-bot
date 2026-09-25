@@ -472,12 +472,16 @@ def friendly_peer_error(err: str | None) -> str | None:
         return None
     return (
         "❌ ဒီ channel/group ကို access မရှိပါ.\n"
-        "• Login ဝင်ထားတဲ့ account က ဒီ channel/group ရဲ့ member ဖြစ်ရမယ်\n"
-        "• Private channel/group ဆို အရင် join (သို့) invite ယူထားရမယ်\n"
-        "• Member ဖြစ်ပြီးသားဆို VPS မှာ bot ကို restart လုပ်ပြီး ပြန်စမ်းပါ\n\n"
-        "No access to this channel/group. The logged-in Telegram account must "
-        "be a member of it — join the private channel/group first, then resend "
-        "the link."
+        "• Bot ကို run နေတဲ့ Telegram account (VPS ပေါ်မှာ login ဝင်ထားတဲ့\n"
+        "  account) က ဒီ channel/group ရဲ့ member ဖြစ်ရမယ်\n"
+        "• ⚠️ bot ကို နှိပ်နေတဲ့သူ member ဖြစ်ရုံနဲ့ မရပါ — bot က\n"
+        "  သူ့ကိုယ်ပိုင် account နဲ့ ဒေါင်းတာပါ\n"
+        "• Private channel/group ဆို အဲဒီ account က အရင် join (သို့)\n"
+        "  invite ယူထားရမယ်\n\n"
+        "No access to this channel/group. The Telegram account the bot itself "
+        "runs as (logged in on the VPS) must be a member — it downloads with "
+        "its own account, not yours. Join the private channel/group with that "
+        "account first, then resend the link."
     )
 
 
