@@ -37,7 +37,7 @@ fi
 
 echo "📦 System packages install လုပ်နေပါတယ်..."
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-pip git curl
+apt-get install -y -qq python3 python3-venv python3-pip git curl ffmpeg
 
 PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 echo "🐍 Python $PYVER"

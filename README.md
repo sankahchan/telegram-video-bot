@@ -17,6 +17,21 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 📦 `/mode` — send as streamable video or as file
 - 🔗 Comment-thread links supported (`t.me/c/.../.../...`)
 - 🔒 Only allowed user IDs can use the bot
+- 🌐 **Web video download** — YouTube / TikTok / Facebook (video·reel·story) / Instagram (video·reel·story) / X + hundreds of sites (yt-dlp). **PDF & direct file links** supported too
+- 📊 `/stats` — download stats (day / 30 days / all-time)
+- 🎵 `/mp3` — extract audio from video
+- 👥 `/adduser` `/deluser` `/users` — multi-user (owner only)
+- 👁️ `/watch` — auto-download new posts from channels (checks every 5 min)
+- 📶 Live download progress %
+- 🗜️ `/quality high|low` — low = compressed 720p (saves bandwidth)
+- 💾 `/save` — also save a copy to your Saved Messages
+- 🌙 `/nightmode` — queue big files (>100MB) for night download (KST hour)
+- 📦 `/zip` — send a batch as one ZIP archive
+- ✂️ `/trim <start> <end>` — cut a video segment (e.g. `/trim 0:10 0:45`)
+- 🔍 `/find <channel> <keyword>` — search media in a channel, tap number to download
+
+> 📌 Instagram/Facebook **private** content (stories etc.) needs login cookies:
+> export `cookies.txt` (browser extension "Get cookies.txt") and place it next to `bot.py`.
 
 ## 🚀 Run on VPS 24/7 (one command)
 

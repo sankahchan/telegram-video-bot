@@ -19,6 +19,8 @@ echo "🔍 Code စစ်နေပါတယ်..."
   || { echo "❌ Code error တွေ့လို့ restart မလုပ်ပါ — အဟောင်း ဆက်� run နေမယ်."; exit 1; }
 echo "📚 Dependencies update..."
 ./venv/bin/pip install -q -r requirements.txt
+echo "🎬 ffmpeg စစ်နေပါတယ်..."
+command -v ffmpeg >/dev/null 2>&1 || apt-get install -y -qq ffmpeg
 echo "🔄 Restart..."
 systemctl restart "$SERVICE_NAME"
 sleep 2
