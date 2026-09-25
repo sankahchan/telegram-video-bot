@@ -50,6 +50,11 @@ def _is_youtube(url: str) -> bool:
 _pot_ok = None  # process-level reachability cache
 
 
+def pot_status() -> bool:
+    """Public wrapper: PO-token provider server reachable? (cached)."""
+    return _pot_available()
+
+
 def _pot_available() -> bool:
     """PO-token provider server reachable? (cached, silent fallback)."""
     global _pot_ok

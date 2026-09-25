@@ -49,6 +49,7 @@ from store import StatsStore, UserStore, WatchStore, QueueStore, SettingsStore  
 from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
     download_direct_file, looks_like_direct_file, direct_file_kind,
+    pot_status,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
@@ -439,6 +440,21 @@ def friendly_web_error(e: Exception) -> str | None:
     """Raw yt-dlp errors -> short bilingual fix guide (None = no special case)."""
     s = str(e)
     if "confirm you're not a bot" in s:
+        pot_hint = ""
+        try:
+            if not pot_status():
+                pot_hint = (
+                    "\n\n💡 PO-token server မရှိသေးပါ — ဒါ YouTube block ကို "
+                    "free နည်း ဖြေရှင်းပေးတာပါ. VPS မှာ run ပါ:\n"
+                    "  docker run -d --restart unless-stopped \\\n"
+                    "    --name pot-provider -p 127.0.0.1:4416:4416 \\\n"
+                    "    brainicism/bgutil-ytdlp-pot-provider\n"
+                    "ပြီးရင်: sudo systemctl restart tg-video-bot\n\n"
+                    "The free PO-token server isn't running on the VPS. Run the "
+                    "Docker command above, restart the bot, then resend the link."
+                )
+        except Exception:
+            pass
         return (
             "❌ YouTube က ဒီ VPS ကို bot အဖြစ် သတ်မှတ်ပြီး block ထားပါတယ်.\n\n"
             "ပြင်နည်း — browser cookies တင်ပေးပါ:\n"
@@ -452,6 +468,7 @@ def friendly_web_error(e: Exception) -> str | None:
             "desktop browser, export youtube.com cookies with the \"Get cookies.txt\" "
             "extension, and upload it as cookies_youtube.txt (or cookies.txt) "
             "under /opt/tg-video-bot/ on the VPS, then resend the link."
+            + pot_hint
         )
     if "Requested format is not available" in s:
         extra = ""
