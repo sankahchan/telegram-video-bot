@@ -65,6 +65,13 @@ if [ -z "$API_ID" ]; then
 fi
 read -rp "API_HASH: " API_HASH
 read -rp "BOT_TOKEN (@BotFather): " BOT_TOKEN
+# paste လုပ်ရင် ပါလာတတ်တဲ့ space/newline တွေ ဖယ် (quote မပါဘဲ .env ထဲ ရေးမှာ)
+API_HASH=$(printf '%s' "$API_HASH" | tr -d '[:space:]')
+BOT_TOKEN=$(printf '%s' "$BOT_TOKEN" | tr -d '[:space:]')
+if [ -z "$API_HASH" ] || [ -z "$BOT_TOKEN" ]; then
+  echo "❌ API_HASH / BOT_TOKEN အလွတ် မရပါ — ပြန်ဖြည့်ပါ."
+  exit 1
+fi
 # ALLOWED_USER_IDS: ဂဏန်း ID တွေပဲ လက်ခံ — username မှားထည့်မိရင် တန်းသတိပေး
 while true; do
   read -rp "ALLOWED_USER_IDS (ဂဏန်း Telegram ID — @userinfobot မှာ ကြည့်နိုင်, Enter=default): " ALLOWED_IDS_RAW

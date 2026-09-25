@@ -6,19 +6,20 @@ Restricted Telegram Media + Web Video Downloader Bot (v5.2)
 - Pyrogram bot client (MTProto)             : ပြန်ပို့ (2GB အထိ ရတယ်)
 - yt-dlp                                    : YouTube / TikTok / Facebook / Instagram / X + ရာချီတဲ့ sites
 
-Features (12):
+Features:
  1. /stats     — download stats (တစ်နေ့/တစ်လ/စုစုပေါင်း)
  2. /mp3       — video ကနေ audio ထုတ်
  3. /adduser   — user ထပ်ထည့် (owner only)
  4. /watch     — channel post အသစ် auto-download
  5. progress   — download % အပြည့်အစုံ
- 6. /quality   — high / low (compress)
+ 6. /quality   — high / low (compress) + link တိုင်း Low/High မေး
  7. /save      — Saved Messages ထဲ auto-save
  8. /nightmode — file ကြီးတွေ ညဘက် auto-download
  9. /zip       — batch ကို ZIP တစ်ဖိုင်တည်း
 10. /trim      — video အပိုင်းဖြတ်
 11. /find      — channel ထဲ media ရှာ
 12. web links  — YouTube/TikTok/FB/IG/X + sites ရာချီ
+13. /help <command> — command တစ်ခုချင်းစီ ရှင်းပြချက် + ဥပမာ
 
 Env vars:
     API_ID, API_HASH   - my.telegram.org က ရတာ
@@ -35,6 +36,8 @@ import tempfile
 import traceback
 import zipfile
 import datetime
+import time
+import uuid
 
 from dotenv import load_dotenv
 
@@ -46,12 +49,13 @@ from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
     download_direct_file, looks_like_direct_file, direct_file_kind,
 )
-from media_tools import to_mp3, trim_video, compress_video, parse_trim_args  # noqa: E402
+from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video  # noqa: E402
 
 from pyrogram import Client as PyroClient
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -102,8 +106,9 @@ night_q = QueueStore()
 settings = SettingsStore()
 
 # In-memory pending states
-pending_trim = {}   # uid -> (start_sec, end_sec)
-pending_finds = {}  # uid -> [(chat_id, msg_id, label)]
+pending_trim = {}      # uid -> (start_sec, end_sec)
+pending_finds = {}     # uid -> [(chat_id, msg_id, label)]
+pending_quality = {}   # uid -> {"token", "text", "trim", "ts"} (quality prompt)
 
 
 # ---------------------------------------------------------------- auth
@@ -150,6 +155,7 @@ WELCOME = (
     "📌 **Telegram link** (restricted channel/group ရတာတွေအပါအဝင်) —\n"
     "📌 **Web link** (YouTube / TikTok / Facebook / Instagram / X / PDF / file) —\n"
     f"တစ်ခါတည်း {MAX_BATCH} ခုအထိ ပို့လို့ရပါတယ်.\n\n"
+    "🎞️ Link ပို့တိုင်း Low / High quality ရွေးခိုင်းမယ် (ဒီတစ်ခါစာပဲ).\n\n"
     "Commands:\n"
     "/mode [video|file] — ပို့မယ့်ပုံစံ\n"
     "/quality [high|low] — low = compress (file သေး)\n"
@@ -163,8 +169,179 @@ WELCOME = (
     "/save [on|off] — Saved Messages ထဲ auto-save\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — (owner only)\n\n"
+    "📖 အသေးစိတ်: /help <command>  (ဥပမာ /help quality)\n\n"
     "⚠️ Login ဝင်ထားတဲ့ account က channel/group ရဲ့ member ဖြစ်နေရပါမယ်."
 )
+
+
+# ---------------------------------------------------------------- help
+HELP_OVERVIEW = (
+    "📖 **Command များ**\n"
+    "(အသေးစိတ်: /help <command> — ဥပမာ /help quality)\n\n"
+    "/mode — ပို့မယ့်ပုံစံ (video/file)\n"
+    "/quality — high/low (မူရင်း/compress)\n"
+    "/mp3 — audio ထုတ် on/off\n"
+    "/zip — batch ကို ZIP တစ်ဖိုင်တည်း\n"
+    "/save — Saved Messages auto-save\n"
+    "/nightmode — file ကြီး ညဘက်ဒေါင်း\n"
+    "/trim — video အပိုင်းဖြတ်\n"
+    "/find — channel ထဲ media ရှာ\n"
+    "/watch — post အသစ် auto-download\n"
+    "/unwatch /watchlist\n"
+    "/stats — download stats\n"
+    "/adduser /deluser /users — owner only"
+)
+
+HELP_TOPICS = {
+    "mode": (
+        "🎬 /mode — ပို့မယ့်ပုံစံ / Send mode\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /mode video  — video player ပုံစံနဲ့ ပို့ (default)\n"
+        "  /mode file   — file/document ပုံစံနဲ့ ပို့\n"
+        "  /mode        — နှစ်ခုကြား ပြောင်း (toggle)\n\n"
+        "ဥပမာ / Example:\n"
+        "  /mode file\n"
+        "→ နောက်ဒေါင်းမယ့် video တွေ file အဖြစ် ရောက်မယ်"
+    ),
+    "quality": (
+        "🎞️ /quality — Video quality\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /quality high  — မူရင်း resolution အတိုင်း (default)\n"
+        "  /quality low   — 720p compress (file သေး, မြန်)\n"
+        "  /quality       — နှစ်ခုကြား ပြောင်း (toggle)\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• Link ပို့တိုင်း bot က Low/High မေးမယ် — ရွေးတာ ဒီတစ်ခါစာပဲ\n"
+        "• /quality setting က watch/night auto-download တွေအတွက် default\n\n"
+        "ဥပမာ / Example:\n"
+        "  /quality low"
+    ),
+    "mp3": (
+        "🎵 /mp3 — Video ကနေ audio ထုတ် / Extract audio\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /mp3 on   — ဒေါင်းသမျှ video ကို MP3 အဖြစ် ပို့\n"
+        "  /mp3 off  — ပိတ် (default)\n"
+        "  /mp3      — toggle\n\n"
+        "ဥပမာ / Example:\n"
+        "  /mp3 on\n"
+        "→ link ပို့ရင် video အစား MP3 file ရမယ်"
+    ),
+    "zip": (
+        "📦 /zip — Batch ကို ZIP တစ်ဖိုင်တည်း\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /zip on   — link အများကြီး ပို့ရင် ZIP တစ်ဖိုင်တည်း ပေါင်းပို့\n"
+        "  /zip off  — တစ်ခုချင်း ပို့ (default)\n"
+        "  /zip      — toggle\n\n"
+        "ဥပမာ / Example:\n"
+        "  /zip on\n"
+        "→ link ၅ ခု ပို့ရင် downloads.zip တစ်ဖိုင်တည်း ရမယ်"
+    ),
+    "save": (
+        "💾 /save — Saved Messages ထဲ auto-save\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /save on   — ပို့သမျှ Saved Messages ထဲလည်း မိတ္တူ သိမ်း\n"
+        "  /save off  — မသိမ်း (default)\n"
+        "  /save      — toggle\n\n"
+        "ဥပမာ / Example:\n"
+        "  /save on"
+    ),
+    "nightmode": (
+        "🌙 /nightmode — File ကြီးတွေ ညဘက်မှ auto-download\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /nightmode on [နာရီ]  — ဖွင့် (နာရီ မပေးရင် 03:00 KST)\n"
+        "  /nightmode off       — ပိတ် (queue ထဲကျန်တာ ချက်ချင်းဒေါင်း)\n"
+        "  /nightmode           — လက်ရှိအခြေအနေ ကြည့်\n\n"
+        "100MB+ file တွေ ညဘက် သတ်မှတ်နာရီမှ ဒေါင်းမယ်.\n\n"
+        "ဥပမာ / Example:\n"
+        "  /nightmode on 2\n"
+        "→ မနက် ၂ နာရီ (KST) မှာ file ကြီးတွေ auto-download"
+    ),
+    "trim": (
+        "✂️ /trim — Video အပိုင်းဖြတ် / Trim video\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /trim <အစ> <အဆုံး>\n"
+        "  ပြီးမှ video link ပို့ — နောက် တစ်သုတ်စာပဲ သက်ရောက်မယ် (one-shot)\n\n"
+        "အချိန် ပုံစံ / Time format:\n"
+        "  စက္ကန့်: 90 | မိနစ်:စက္ကန့်: 1:30 | နာရီ:မိနစ်:စက္ကန့်: 01:02:03\n\n"
+        "ဥပမာ / Example:\n"
+        "  /trim 0:10 0:45\n"
+        "→ video ရဲ့ 10s–45s အပိုင်းပဲ ဖြတ်ပို့မယ်"
+    ),
+    "find": (
+        "🔍 /find — Channel ထဲ media ရှာ / Search channel media\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /find <channel> <ရှာမယ့်စာသား>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /find @mychannel funny video\n"
+        "→ တွေ့တာတွေ နံပါတ်နဲ့ ပြမယ်, နံပါတ် ပို့ရင် ဒေါင်းမယ်:\n"
+        "  1"
+    ),
+    "watch": (
+        "👁️ /watch — Post အသစ် auto-download\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /watch <channel link သို့မဟုတ် @username>\n\n"
+        "5 မိနစ်တစ်ခါ စစ်ပြီး post အသစ်တင်တိုင်း auto-download ပို့ပေးမယ်.\n"
+        "Quality က /quality setting အတိုင်း သုံးမယ်.\n\n"
+        "ဥပမာ / Example:\n"
+        "  /watch @mychannel\n"
+        "→ စလုပ်ချိန်ကနေ နောက်ပိုင်း post အသစ်တွေ အလိုလို ရောက်မယ်"
+    ),
+    "unwatch": (
+        "🚫 /unwatch — Watch ဖြုတ်\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /unwatch <channel>\n"
+        "  /unwatch all  — အားလုံး ဖြုတ်\n\n"
+        "ဥပမာ / Example:\n"
+        "  /unwatch @mychannel"
+    ),
+    "watchlist": (
+        "📋 /watchlist — Watch လုပ်ထားတဲ့ channel များ ကြည့်\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /watchlist"
+    ),
+    "stats": (
+        "📊 /stats — Download stats\n\n"
+        "ဒီနေ့ / ရက် ၃၀ / စုစုပေါင်း — အရေအတွက် နဲ့ MB ပြမယ်.\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /stats"
+    ),
+    "adduser": (
+        "➕ /adduser — User ထပ်ထည့် (owner only)\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /adduser <Telegram ID>\n"
+        "  /adduser @username\n\n"
+        "ဥပမာ / Example:\n"
+        "  /adduser 123456789"
+    ),
+    "deluser": (
+        "➖ /deluser — User ဖြုတ် (owner only)\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /deluser <Telegram ID>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /deluser 123456789"
+    ),
+    "users": (
+        "👥 /users — သုံးခွင့်ရှိသူများ ကြည့် (owner only)\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /users"
+    ),
+}
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        await update.message.reply_text("⛔ ဒီ bot ကို သုံးခွင့်မရှိပါ။")
+        return
+    if context.args:
+        name = context.args[0].lstrip("/").lower()
+        topic = HELP_TOPICS.get(name)
+        if topic:
+            await update.message.reply_text(topic)
+        else:
+            await update.message.reply_text(
+                f"❌ /{name} ဆိုတာ မရှိပါ.\n/help ပို့ပြီး command list ကြည့်ပါ."
+            )
+        return
+    await update.message.reply_text(HELP_OVERVIEW)
 
 
 # ---------------------------------------------------------------- helpers
@@ -497,6 +674,63 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👁️ **Watch list:**\n" + "\n".join(lines))
 
 
+# ---------------------------------------------------------------- quality prompt
+QUALITY_PROMPT_TTL = 600  # seconds
+
+
+def _needs_quality_prompt(jobs) -> bool:
+    """True when the batch may contain video (quality choice matters)."""
+    for kind, ref in jobs:
+        if kind == "tg":
+            return True  # kind unknown until fetched — usually video
+        if not looks_like_direct_file(ref):
+            return True  # YouTube/TikTok/... -> video
+        if direct_file_kind(ref) == "video":
+            return True  # direct .mp4 etc.
+    return False
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inline button callbacks: quality choice for a pending download."""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    if not allowed(update):
+        return
+    m = re.fullmatch(r"q:(low|high):([0-9a-f]+)", q.data or "")
+    if not m:
+        return
+    choice, token = m.groups()
+    uid = q.from_user.id
+    pend = pending_quality.get(uid)
+    if not pend or pend.get("token") != token:
+        try:
+            await q.edit_message_text("⏰ ဒီ ရွေးချယ်မှု မရှိတော့ပါ — link ပြန်ပို့ပေးပါ.")
+        except Exception:
+            pass
+        return
+    if time.time() - pend.get("ts", 0) > QUALITY_PROMPT_TTL:
+        pending_quality.pop(uid, None)
+        try:
+            await q.edit_message_text("⏰ သက်တမ်းကုန်သွားပါပြီ — link ပြန်ပို့ပေးပါ.")
+        except Exception:
+            pass
+        return
+    pending_quality.pop(uid, None)
+    if pend.get("trim"):
+        pending_trim[uid] = pend["trim"]
+    label = "⬆️ High (မူရင်း)" if choice == "high" else "⬇️ Low (မြန်/file သေး)"
+    try:
+        await q.edit_message_text(f"✅ {label} ရွေးပြီးပါပြီ — ဒေါင်းနေပါတယ်...")
+    except Exception:
+        pass
+    await handle_link(update, context, text=pend["text"], quality=choice, prompt=False)
+
+
 # ---------------------------------------------------------------- core flow
 async def fetch_message(chat_id, msg_id, _retried=False):
     """Message ကို တိုက်ရိုက်ရှာမယ် (linked chat fallback + dialogs sync retry)."""
@@ -576,9 +810,13 @@ async def download_tg_media(msg, dest, progress):
 
 
 async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
-                     use_trim: bool = True):
-    """trim -> mp3 -> compress. Returns (final_path, as_audio)."""
+                     use_trim: bool = True, quality: str = None):
+    """trim -> mp3 -> compress. Returns (final_path, as_audio).
+
+    quality: one-time override ("high"/"low"); falls back to saved setting.
+    """
     s = st(uid)
+    eff_quality = quality or s["quality"]
     cur = path
     as_audio = False
     # ffmpeg ops only make sense on real audio/video files (not PDF etc.)
@@ -598,7 +836,7 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
         cur = await to_mp3(cur, out)
         as_audio = True
     # 3. compress (quality low, video only, not already audio)
-    elif is_media and s["quality"] == "low" and kind == "video":
+    elif is_media and eff_quality == "low" and kind == "video":
         out = f"{tmpdir}/{idx}_low.mp4"
         cur = await compress_video(cur, out)
     return cur, as_audio
@@ -610,7 +848,6 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
     s = st(uid)
     mode = s["mode"]
     caption = build_caption(caption)
-    from media_tools import probe_video
     if as_audio:
         meta = await asyncio.to_thread(probe_video, path)
         await bot_client.send_audio(
@@ -663,15 +900,25 @@ def make_tg_progress(status, tag, loop):
     return cb
 
 
-async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                      text: str = None, quality: str = None, prompt: bool = True):
+    """Link handler.
+
+    text: override message text (used by quality-prompt callback re-entry).
+    quality: one-time "high"/"low" override for this batch (None = saved setting).
+    prompt: ask Low/High via buttons before downloading (False for jobs/callbacks).
+    """
+    emsg = update.effective_message
+    text = (text or "").strip()
+    if not text and emsg and emsg.text:
+        text = emsg.text.strip()
+    if not text or emsg is None:
         return
     if not allowed(update):
-        await update.message.reply_text("⛔ ဒီ bot ကို သုံးခွင့်မရှိပါ။")
+        await emsg.reply_text("⛔ ဒီ bot ကို သုံးခွင့်မရှိပါ။")
         return
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-    text = update.message.text.strip()
 
     # /find ရွေးချယ်မှု (နံပါတ်)
     if text.isdigit() and uid in pending_finds:
@@ -680,10 +927,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 1 <= i <= len(results):
             cid, mid, kind, label = results[i - 1]
             del pending_finds[uid]
-            await update.message.reply_text(f"📥 '{label or kind}' ဒေါင်းနေပါတယ်...")
+            await emsg.reply_text(f"📥 '{label or kind}' ဒေါင်းနေပါတယ်...")
             with tempfile.TemporaryDirectory() as tmpdir:
                 loop = asyncio.get_running_loop()
-                status = await update.message.reply_text("📥 ရှာနေပါတယ်...")
+                status = await emsg.reply_text("📥 ရှာနေပါတယ်...")
                 msg, _, err = await fetch_message(cid, mid)
                 if not msg or not media_of(msg):
                     await status.edit_text(f"❌ မရပါ: {err or 'media မရှိ'}")
@@ -700,7 +947,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     traceback.print_exc()
                     await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
         else:
-            await update.message.reply_text("❌ နံပါတ် မှားနေပါတယ်.")
+            await emsg.reply_text("❌ နံပါတ် မှားနေပါတယ်.")
         return
 
     # Telegram links
@@ -716,7 +963,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     web_urls = extract_web_urls(text)
 
     if not tg_jobs and not web_urls:
-        await update.message.reply_text(
+        await emsg.reply_text(
             "❌ Link ပုံစံ မှားနေပါတယ်.\n"
             "Telegram: https://t.me/c/1234567890/123\n"
             "Web: YouTube / TikTok / Facebook / Instagram / X link"
@@ -725,16 +972,40 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     jobs = [("tg", j) for j in tg_jobs] + [("web", u) for u in web_urls]
     if len(jobs) > MAX_BATCH:
-        await update.message.reply_text(
+        await emsg.reply_text(
             f"⚠️ တစ်ခါတည်း အများဆုံး {MAX_BATCH} ခုပဲ — ပထမ {MAX_BATCH} ခု လုပ်ပေးမယ်."
         )
         jobs = jobs[:MAX_BATCH]
+
+    # Quality prompt — link ပို့တိုင်း Low/High မေး (ဒီတစ်ခါစာပဲ)
+    if prompt and _needs_quality_prompt(jobs):
+        token = uuid.uuid4().hex[:8]
+        prev = pending_quality.get(uid)
+        pending_quality[uid] = {
+            "token": token,
+            "text": text,
+            # /trim one-shot ကို prompt ကျော်ပြီး ထိန်း (အဟောင်း prompt ရှိရင်လည်း မပျောက်)
+            "trim": pending_trim.pop(uid, None) or (prev.get("trim") if prev else None),
+            "ts": time.time(),
+        }
+        kb = [[
+            InlineKeyboardButton("⬇️ Low (မြန်/file သေး)",
+                                 callback_data=f"q:low:{token}"),
+            InlineKeyboardButton("⬆️ High (မူရင်း)",
+                                 callback_data=f"q:high:{token}"),
+        ]]
+        await emsg.reply_text(
+            "🎞️ Quality ရွေးပါ (ဒီတစ်ခါစာပဲ):\n"
+            "🤖 watch/night auto-download တွေက /quality setting အတိုင်း သုံးမယ်.",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return
 
     n = len(jobs)
     single = n == 1
     s = st(uid)
     loop = asyncio.get_running_loop()
-    status = await update.message.reply_text(f"📥 {n} ခု တွေ့ပြီ — စတင်နေပါတယ်...")
+    status = await emsg.reply_text(f"📥 {n} ခု တွေ့ပြီ — စတင်နေပါတယ်...")
     ok, fail, queued = 0, 0, 0
     collected = []  # zip mode
 
@@ -757,24 +1028,26 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg, _, err = await fetch_message(cid, mid)
                     if not msg:
                         fail += 1
-                        await update.message.reply_text(f"❌ {tag} မရပါ.\n{err}")
+                        await emsg.reply_text(f"❌ {tag} မရပါ.\n{err}")
                         continue
                     if not media_of(msg):
                         fail += 1
-                        await update.message.reply_text(f"❌ {tag}: media မရှိပါ.")
+                        await emsg.reply_text(f"❌ {tag}: media မရှိပါ.")
                         continue
                     # night queue?
                     if s["night"] and media_size_mb(msg) >= NIGHT_MIN_MB:
                         night_q.add({"kind": "tg", "ref": {"chat": cid, "msg": mid},
                                      "user_id": uid, "chat_id": chat_id,
                                      "ts": datetime.datetime.now().isoformat(),
-                                     "label": f"t.me msg {mid}"})
+                                     "label": f"t.me msg {mid}",
+                                     "quality": quality or s["quality"]})
                         queued += 1
                         continue
                     path = await download_tg_media(
                         msg, f"{tmpdir}/{idx}_",
                         make_tg_progress(status, tag, loop))
-                    final, as_audio = await post_process(path, media_kind(msg), uid, tmpdir, idx)
+                    final, as_audio = await post_process(
+                        path, media_kind(msg), uid, tmpdir, idx, quality=quality)
                     if s["zip"]:
                         collected.append((final, build_caption(msg.caption),
                                           media_kind(msg), as_audio))
@@ -795,7 +1068,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             night_q.add({"kind": "web", "ref": {"url": url},
                                          "user_id": uid, "chat_id": chat_id,
                                          "ts": datetime.datetime.now().isoformat(),
-                                         "label": url[:80]})
+                                         "label": url[:80],
+                                         "quality": quality or s["quality"]})
                             queued += 1
                             continue
                     # PDF / direct file -> plain HTTP download; else yt-dlp
@@ -806,7 +1080,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         try:
                             path, title = await download_web(
-                                url, tmpdir, quality=s["quality"],
+                                url, tmpdir, quality=quality or s["quality"],
                                 progress_cb=web_progress, loop=loop, tag=tag)
                             wk = "video"
                         except Exception as e:
@@ -816,7 +1090,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 wk = direct_file_kind(url)
                             else:
                                 raise
-                    final, as_audio = await post_process(path, wk, uid, tmpdir, idx)
+                    final, as_audio = await post_process(
+                        path, wk, uid, tmpdir, idx, quality=quality)
                     if s["zip"]:
                         collected.append((final, title, wk, as_audio))
                     else:
@@ -829,7 +1104,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 traceback.print_exc()
                 fail += 1
                 err = str(e)[:300]
-                await update.message.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
+                await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
 
         # zip mode: everything into one archive
         if collected and s["zip"]:
@@ -851,7 +1126,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 traceback.print_exc()
                 fail += len(collected)
-                await update.message.reply_text(f"❌ ZIP မအောင်မြင်ပါ: {e}")
+                await emsg.reply_text(f"❌ ZIP မအောင်မြင်ပါ: {e}")
 
     # trim one-shot ပဲ — သုံးပြီးရင် ရှင်း
     pending_trim.pop(uid, None)
@@ -926,13 +1201,15 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
             for it in ulist:
                 try:
                     kind, ref = it["kind"], it["ref"]
+                    nq = it.get("quality") or s["quality"]
                     if kind == "tg":
                         msg, _, err = await fetch_message(ref["chat"], ref["msg"])
                         if not msg or not media_of(msg):
                             continue
                         path = await download_tg_media(msg, f"{tmpdir}/n_", None)
                         final, as_audio = await post_process(
-                            path, media_kind(msg), uid, tmpdir, 0, use_trim=False)
+                            path, media_kind(msg), uid, tmpdir, 0,
+                            use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, msg.caption,
                                       media_kind(msg), as_audio, True)
                     else:
@@ -942,10 +1219,10 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             wk = direct_file_kind(url)
                         else:
                             path, title = await download_web(
-                                url, tmpdir, quality=s["quality"])
+                                url, tmpdir, quality=nq)
                             wk = "video"
                         final, as_audio = await post_process(
-                            path, wk, uid, tmpdir, 0, use_trim=False)
+                            path, wk, uid, tmpdir, 0, use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, title,
                                       wk, as_audio, wk == "video", log_kind="web")
                     try:
@@ -988,7 +1265,7 @@ def main():
         .build()
     )
     for cmd, fn in [
-        ("start", start_cmd), ("help", start_cmd),
+        ("start", start_cmd), ("help", help_cmd),
         ("mode", mode_cmd), ("quality", quality_cmd),
         ("mp3", mp3_cmd), ("zip", zip_cmd), ("save", save_cmd),
         ("nightmode", nightmode_cmd), ("stats", stats_cmd),
@@ -997,6 +1274,7 @@ def main():
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^q:(low|high):"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,

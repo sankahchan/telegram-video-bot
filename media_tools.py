@@ -56,10 +56,14 @@ async def trim_video(src: str, dst: str, start: float, end: float) -> str:
 
 
 async def compress_video(src: str, dst: str) -> str:
-    """Compress to 720p for smaller size (quality=low)."""
+    """Compress to 720p for smaller size (quality=low).
+
+    min(720,ih): never upscale videos that are already smaller than 720p —
+    the original resolution is preserved in that case.
+    """
     await _run_ffmpeg([
         "-i", src,
-        "-vf", "scale=-2:720",
+        "-vf", "scale=-2:'min(720,ih)'",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
         "-c:a", "aac", "-b:a", "128k",
         dst,

@@ -24,7 +24,12 @@ def get_cred(name):
 
 
 async def main():
-    api_id = int(get_cred("API_ID"))
+    import re
+    raw_id = get_cred("API_ID")
+    digits = re.findall(r"\d+", raw_id)  # smart-quote/space ပါလာလည်း ခံနိုင်ရည်ရှိ
+    if not digits:
+        raise SystemExit("❌ API_ID ဂဏန်းဖြစ်ရမယ် — my.telegram.org က App api_id ကို ထည့်ပါ.")
+    api_id = int(digits[0])
     api_hash = get_cred("API_HASH")
 
     async with Client("tmp_session", api_id=api_id, api_hash=api_hash) as app:
