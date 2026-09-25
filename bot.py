@@ -848,7 +848,8 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
     s = st(uid)
     mode = s["mode"]
     caption = build_caption(caption)
-    if as_audio:
+    if as_audio or (kind == "audio" and mode == "video"):
+        # MP3-extracted or Telegram audio/voice message -> proper audio bubble
         meta = await asyncio.to_thread(probe_video, path)
         await bot_client.send_audio(
             chat_id, path, caption=caption,
@@ -857,7 +858,7 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
         await bot_client.send_photo(chat_id, path, caption=caption)
     elif kind == "video_note":
         await bot_client.send_video_note(chat_id, path)
-    elif as_video and mode == "video":
+    elif as_video and kind == "video" and mode == "video":
         # Pass real dimensions so Telegram shows the original aspect ratio
         # (w=0/h=0 makes clients render a square bubble).
         meta = await asyncio.to_thread(probe_video, path)
@@ -867,6 +868,7 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
             height=meta.get("height", 0) or 0,
             duration=meta.get("duration", 0) or 0)
     else:
+        # documents (PDF/ZIP/...) and anything else -> plain file
         await bot_client.send_document(chat_id, path, caption=caption)
     if s["save"]:
         try:
@@ -941,7 +943,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         make_tg_progress(status, "📥", loop))
                     final, as_audio = await post_process(path, media_kind(msg), uid, tmpdir, 0)
                     await status.edit_text("📤 ပို့နေပါတယ်...")
-                    await deliver(uid, chat_id, final, msg.caption, media_kind(msg), as_audio, True)
+                    await deliver(uid, chat_id, final, msg.caption, media_kind(msg), as_audio, media_kind(msg) == "video")
                     await status.delete()
                 except Exception as e:
                     traceback.print_exc()
@@ -1054,7 +1056,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     else:
                         await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
                         await deliver(uid, chat_id, final, msg.caption,
-                                      media_kind(msg), as_audio, True)
+                                      media_kind(msg), as_audio, media_kind(msg) == "video")
                     ok += 1
                     print(f"✅ tg ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
                 else:
@@ -1168,7 +1170,7 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
                                 path, media_kind(m), uid, tmpdir, m.id, use_trim=False)
                             await deliver(uid, uid, final,
                                           f"👁️ {w.get('title','')}\n{(m.caption or '')}",
-                                          media_kind(m), as_audio, True)
+                                          media_kind(m), as_audio, media_kind(m) == "video")
                             print(f"👁️ watch: {w.get('title')} msg {m.id} -> {uid}")
                         except Exception as e:
                             print(f"⚠️ watch download failed: {e}")
@@ -1211,7 +1213,7 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             path, media_kind(msg), uid, tmpdir, 0,
                             use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, msg.caption,
-                                      media_kind(msg), as_audio, True)
+                                      media_kind(msg), as_audio, media_kind(msg) == "video")
                     else:
                         url = ref["url"]
                         if looks_like_direct_file(url):
