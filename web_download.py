@@ -88,6 +88,13 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
             total = int(resp.headers.get("Content-Length") or 0)
             if total and total > max_mb * 1048576:
                 raise RuntimeError(f"File ကြီးလွန်းပါတယ် ({total/1048576:.0f}MB > {max_mb}MB)")
+            ct = resp.headers.get("Content-Type", "")
+            if "text/html" in ct:
+                # e.g. yt-dlp "Unsupported URL" fallback landing on a video
+                # watch page — never send the page HTML as file.bin
+                raise RuntimeError(
+                    "webpage (HTML) သာ ရရှိပါတယ် — video file မဟုတ်ပါ. "
+                    "link က login-walled / extractor မသိတဲ့ ပုံစံဖြစ်နိုင်ပါတယ်.")
             # filename from URL or Content-Disposition
             name = os.path.basename(urllib.parse.urlparse(url).path) or "file"
             cd = resp.headers.get("Content-Disposition", "")
@@ -125,6 +132,8 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
         try:
             return await asyncio.to_thread(_run)
         except Exception as e:
+            if "webpage (HTML)" in str(e):
+                raise  # retrying won't turn a login wall into a video file
             last_err = f"{type(e).__name__}: {e}"
             print(f"⚠️ direct download failed ({last_err}) — retrying ({attempt + 1}/3)")
             await asyncio.sleep(2 * (attempt + 1))
@@ -210,6 +219,43 @@ def _retryable_yt_error(e: Exception) -> bool:
     return any(k.lower() in s for k in _RETRYABLE_YT)
 
 
+async def _resolve_url(url: str) -> str:
+    """Follow HTTP redirects to the canonical URL.
+
+    e.g. facebook.com/share/v/<token>/ -> facebook.com/reel/<id>,
+    which yt-dlp's site extractors can actually match.
+    Sends cookies.txt cookies (same session yt-dlp uses) so private/
+    friends-only links can resolve when the user is logged in.
+    """
+    if "/share/" not in url:
+        return url
+
+    def _run():
+        import http.cookiejar
+        import urllib.request
+        try:
+            cj = http.cookiejar.MozillaCookieJar()
+            if os.path.exists(COOKIE_FILE):
+                try:
+                    cj.load(COOKIE_FILE, ignore_discard=True, ignore_expires=True)
+                except Exception:
+                    pass
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(cj))
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            # urlopen follows redirects; geturl() is the final URL.
+            # Body is never read — we only want the resolved address.
+            with opener.open(req, timeout=20) as resp:
+                return resp.geturl()
+        except Exception as e:
+            print(f"⚠️ redirect resolve failed ({e}) — original URL သုံးမယ်")
+            return url
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception:
+        return url
+
+
 async def _diagnose_formats(url: str) -> str:
     """Probe video info (no download) to explain an empty format list."""
     def _run():
@@ -256,6 +302,22 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             "yt-dlp မရှိသေးပါ — VPS မှာ update.sh run ပေးပါ:\n"
             "bash /opt/tg-video-bot/update.sh"
         )
+
+    # facebook.com/share/v|/r/ links are shortlinks — resolve to the canonical
+    # video URL first so yt-dlp's site extractors match.
+    url = await _resolve_url(url)
+    if "facebook.com/login" in url:
+        # share link bounced to login: video is not public, or Facebook is
+        # login-walling this IP — a clear message beats a cryptic failure.
+        raise RuntimeError(
+            "🔒 Facebook က login တောင်းနေပါတယ်.\n"
+            "ဒီ video က public မဟုတ်တာ (friends-only/private) ဖြစ်နိုင်သလို, "
+            "VPS IP ကို Facebook က login wall ထားတာလည်း ဖြစ်နိုင်ပါတယ်.\n"
+            "browser မှာ Facebook login ဝင်ထားပြီး ထုတ်တဲ့ cookies.txt ကို "
+            "VPS ပေါ် (/opt/tg-video-bot/cookies.txt) တင်ထားရင် ပြန်စမ်းကြည့်ပါ.\n\n"
+            "🔒 Facebook is asking for login. The video may be friends-only, "
+            "or Facebook may be login-walling the VPS IP. Make sure your "
+            "cookies.txt (exported while logged into Facebook) is on the VPS.")
 
     if audio_only:
         fmts = ["ba/b", "b"]
