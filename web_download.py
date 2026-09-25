@@ -9,6 +9,7 @@ Private/login-walled content: put browser cookies in cookies.txt
 import asyncio
 import os
 import re
+import time
 
 from x_media import XMediaError, extract_x_media, is_x_url
 
@@ -47,20 +48,27 @@ def _is_youtube(url: str) -> bool:
     return "youtube.com" in lu or "youtu.be" in lu
 
 
-_pot_ok = None  # process-level reachability cache
+_pot_ok = None            # last reachability result
+_pot_checked_at = 0.0     # monotonic() when last probed
+_POT_RECHECK_S = 60.0     # re-probe at most once a minute
 
 
 def pot_status() -> bool:
-    """Public wrapper: PO-token provider server reachable? (cached)."""
+    """Public wrapper: PO-token provider server reachable? (re-checked every minute)."""
     return _pot_available()
 
 
 def _pot_available() -> bool:
-    """PO-token provider server reachable? (cached, silent fallback)."""
-    global _pot_ok
-    if _pot_ok is not None:
+    """PO-token provider server reachable? Re-probed at most once a minute.
+
+    A permanent cache was a bug: if the container was still booting when the
+    bot started, PO-token stayed disabled for the whole process lifetime.
+    """
+    global _pot_ok, _pot_checked_at
+    now = time.monotonic()
+    if _pot_ok is not None and now - _pot_checked_at < _POT_RECHECK_S:
         return _pot_ok
-    _pot_ok = False
+    _pot_ok, _pot_checked_at = False, now
     if POT_PROVIDER_URL:
         try:
             import socket

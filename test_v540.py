@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -166,6 +167,7 @@ old_pot = wd._pot_ok
 old_proxy = wd.YTDLP_PROXY
 try:
     wd._pot_ok = True  # pretend provider reachable
+    wd._pot_checked_at = time.monotonic()
     ea = wd.pot_extractor_args("https://youtube.com/watch?v=1")
     check("pot key exact", ea == {"youtubepot-bgutilhttp": {"base_url": wd.POT_PROVIDER_URL}})
     check("pot non-yt", wd.pot_extractor_args("https://x.com/a") == {})
@@ -175,6 +177,7 @@ try:
     check("pot keeps player_client",
           opts["extractor_args"]["youtube"] == {"player_client": ["android"]})
     wd._pot_ok = False  # provider down -> silent skip
+    wd._pot_checked_at = time.monotonic()
     check("pot unset", wd.pot_extractor_args("https://youtube.com/watch?v=1") == {})
     opts2 = wd._base_opts("/tmp/o", "b", ["android"], "https://youtube.com/watch?v=1")
     check("pot absent in opts", "youtubepot-bgutilhttp" not in opts2.get("extractor_args", {}))
@@ -183,6 +186,14 @@ try:
     check("proxy set", opts3.get("proxy") == "socks5://u:p@h:1")
     wd.YTDLP_PROXY = ""
     check("proxy unset", "proxy" not in wd._base_opts("/tmp/o", "b"))
+    # TTL: fresh timestamp -> cached value kept, no re-probe
+    wd._pot_ok = True
+    wd._pot_checked_at = time.monotonic()
+    check("pot ttl fresh", wd._pot_available() is True)
+    # TTL: stale timestamp -> re-probe (no server here -> False)
+    wd._pot_ok = True
+    wd._pot_checked_at = time.monotonic() - 9999
+    check("pot ttl stale re-probes", wd._pot_available() is False)
 finally:
     wd._pot_ok, wd.YTDLP_PROXY = old_pot, old_proxy
 
