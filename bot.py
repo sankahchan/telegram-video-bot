@@ -398,6 +398,26 @@ def original_filename(msg, kind: str, tag) -> str:
     return f"{tag}_{base}{ext or ''}"
 
 
+def friendly_web_error(e: Exception) -> str | None:
+    """Raw yt-dlp errors -> short bilingual fix guide (None = no special case)."""
+    s = str(e)
+    if "confirm you're not a bot" in s:
+        return (
+            "❌ YouTube က ဒီ VPS ကို bot အဖြစ် သတ်မှတ်ပြီး block ထားပါတယ်.\n\n"
+            "ပြင်နည်း — browser cookies တင်ပေးပါ:\n"
+            "1️⃣ ကွန်ပျူတာ browser မှာ YouTube ကို login ဝင်ထားပါ\n"
+            "2️⃣ \"Get cookies.txt\" extension နဲ့ youtube.com အတွက် cookies ထုတ်ပါ\n"
+            "3️⃣ ရလာတဲ့ cookies.txt ကို VPS ပေါ်မှာ\n"
+            "     /opt/tg-video-bot/cookies.txt အဖြစ် တင်ပါ\n"
+            "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
+            "YouTube is blocking this VPS as a bot. Fix: log into YouTube in a "
+            "desktop browser, export youtube.com cookies with the \"Get cookies.txt\" "
+            "extension, and upload it as /opt/tg-video-bot/cookies.txt on the VPS, "
+            "then resend the link."
+        )
+    return None
+
+
 def build_caption(text: str) -> str:
     text = (text or "").strip()
     if len(text) > 1000:
@@ -1153,8 +1173,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception as e:
                 traceback.print_exc()
                 fail += 1
-                err = str(e)[:300]
-                await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
+                friendly = friendly_web_error(e)
+                if friendly:
+                    await emsg.reply_text(friendly)
+                else:
+                    err = str(e)[:300]
+                    await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
 
         # zip mode: everything into one archive
         if collected and s["zip"]:
