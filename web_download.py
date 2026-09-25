@@ -53,6 +53,23 @@ def looks_like_direct_file(url: str) -> bool:
     return bool(DIRECT_FILE_RE.search(url))
 
 
+_DIRECT_VIDEO = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts")
+_DIRECT_AUDIO = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac")
+_DIRECT_PHOTO = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+
+
+def direct_file_kind(url: str) -> str:
+    """video | audio | photo | doc — for sending direct files correctly."""
+    path = url.lower().split("?")[0].split("#")[0]
+    if path.endswith(_DIRECT_VIDEO):
+        return "video"
+    if path.endswith(_DIRECT_AUDIO):
+        return "audio"
+    if path.endswith(_DIRECT_PHOTO):
+        return "photo"
+    return "doc"
+
+
 async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
                                progress_cb=None, loop=None, tag: str = "📥"):
     """Plain HTTP download for direct file links (PDF etc.). Returns (path, filename)."""

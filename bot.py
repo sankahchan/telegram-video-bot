@@ -44,7 +44,7 @@ from fast_download import fast_download  # noqa: E402
 from store import StatsStore, UserStore, WatchStore, QueueStore, SettingsStore  # noqa: E402
 from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
-    download_direct_file, looks_like_direct_file,
+    download_direct_file, looks_like_direct_file, direct_file_kind,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args  # noqa: E402
 
@@ -147,7 +147,7 @@ LINK_RE = re.compile(r"t\.me/(?:c/(\d+)|([A-Za-z0-9_]{5,}))/(\d+)(?:/(\d+))?")
 
 WELCOME = (
     "👋 Downloader Bot မှ ကြိုဆိုပါတယ်!\n\n"
-    "📌 **Telegram link** (restricted channel/group ရတာတွેડပါ) —\n"
+    "📌 **Telegram link** (restricted channel/group ရတာတွေအပါအဝင်) —\n"
     "📌 **Web link** (YouTube / TikTok / Facebook / Instagram / X / PDF / file) —\n"
     f"တစ်ခါတည်း {MAX_BATCH} ခုအထိ ပို့လို့ရပါတယ်.\n\n"
     "Commands:\n"
@@ -335,12 +335,16 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("အသုံးပြုပုံ: /adduser <Telegram ID သို့မဟုတ် @username>")
         return
     ref = context.args[0]
+    ids = re.findall(r"\d+", ref)
+    if not ref.startswith("@") and not ids:
+        await update.message.reply_text("❌ ဂဏန်း Telegram ID ထည့်ပါ — ဥပမာ: /adduser 123456789")
+        return
     try:
         if ref.startswith("@"):
             u = await user.get_users(ref)
             new_id = u.id
         else:
-            new_id = int(re.findall(r"\d+", ref)[0])
+            new_id = int(ids[0])
     except Exception as e:
         await update.message.reply_text(f"❌ User ရှာမရပါ: {e}")
         return
@@ -542,7 +546,8 @@ async def download_tg_media(msg, dest, progress):
         return path
 
 
-async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int):
+async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
+                     use_trim: bool = True):
     """trim -> mp3 -> compress. Returns (final_path, as_audio)."""
     s = st(uid)
     cur = path
@@ -553,8 +558,8 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int):
         ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts",
         ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac",
     }
-    # 1. trim
-    if is_media and uid in pending_trim and kind in ("video", "audio", "doc"):
+    # 1. trim (one-shot, user-sent links only — not watch/night jobs)
+    if use_trim and is_media and uid in pending_trim and kind in ("video", "audio", "doc"):
         start, end = pending_trim[uid]
         out = f"{tmpdir}/{idx}_trim.mp4"
         cur = await trim_video(cur, out, start, end)
@@ -571,7 +576,7 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int):
 
 
 async def deliver(uid: int, chat_id: int, path: str, caption: str,
-                  kind: str, as_audio: bool, as_video: bool):
+                  kind: str, as_audio: bool, as_video: bool, log_kind: str = "tg"):
     """Bot ကနေ ပို့ + Saved Messages (optional) + stats."""
     s = st(uid)
     mode = s["mode"]
@@ -592,7 +597,14 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
         except Exception as e:
             print(f"⚠️ Saved Messages ပို့မရပါ: {e}")
     try:
-        stats.log(os.path.getsize(path) / 1048576, "tg", uid)
+        stats.log(os.path.getsize(path) / 1048576, log_kind, uid)
+    except Exception:
+        pass
+
+
+def _swallow(fut):
+    try:
+        fut.result()
     except Exception:
         pass
 
@@ -605,7 +617,8 @@ def make_tg_progress(status, tag, loop):
         if pct - last[0] >= 5:
             last[0] = pct
             fut = status.edit_text(f"{tag} ⬇️ {pct}%")
-            asyncio.run_coroutine_threadsafe(fut, loop)
+            f2 = asyncio.run_coroutine_threadsafe(fut, loop)
+            f2.add_done_callback(_swallow)
 
     return cb
 
@@ -746,30 +759,30 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             queued += 1
                             continue
                     # PDF / direct file -> plain HTTP download; else yt-dlp
-                    direct_kind = None
                     if looks_like_direct_file(url):
                         path, title = await download_direct_file(
                             url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
-                        direct_kind = "doc"
+                        wk = direct_file_kind(url)
                     else:
                         try:
                             path, title = await download_web(
                                 url, tmpdir, quality=s["quality"],
                                 progress_cb=web_progress, loop=loop, tag=tag)
+                            wk = "video"
                         except Exception as e:
                             if "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__:
                                 path, title = await download_direct_file(
                                     url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
-                                direct_kind = "doc"
+                                wk = direct_file_kind(url)
                             else:
                                 raise
-                    wk = direct_kind or "video"
                     final, as_audio = await post_process(path, wk, uid, tmpdir, idx)
                     if s["zip"]:
                         collected.append((final, title, wk, as_audio))
                     else:
                         await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
-                        await deliver(uid, chat_id, final, title, wk, as_audio, wk == "video")
+                        await deliver(uid, chat_id, final, title, wk, as_audio,
+                                      wk == "video", log_kind="web")
                     ok += 1
                     print(f"✅ web ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
             except Exception as e:
@@ -816,11 +829,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------------------------------------------------- background jobs
 async def watch_job(context: ContextTypes.DEFAULT_TYPE):
-    """၅ မိနစ်တစ်ခါ: watch�ားတဲ့ channel တွေမှာ post အသစ် စစ်."""
+    """5 မိနစ်တစ်ခါ: watch လုပ်ထားတဲ့ channel တွေမှာ post အသစ် စစ်မယ်."""
     for uid, chats in watches.all().items():
         if not allowed_uid(uid):
             continue
-        s = settings.get(uid)
         for cid, w in chats.items():
             try:
                 max_id = w.get("last_id", 0)
@@ -838,7 +850,7 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
                         try:
                             path = await download_tg_media(m, f"{tmpdir}/w_", None)
                             final, as_audio = await post_process(
-                                path, media_kind(m), uid, tmpdir, m.id)
+                                path, media_kind(m), uid, tmpdir, m.id, use_trim=False)
                             await deliver(uid, uid, final,
                                           f"👁️ {w.get('title','')}\n{(m.caption or '')}",
                                           media_kind(m), as_audio, True)
@@ -851,7 +863,11 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def night_job(context: ContextTypes.DEFAULT_TYPE):
-    """၁ နာရီတစ်ခါ: night_hour (KST) ရောက်ရင် queue ထဲက file ကြီးတွေ ဒေါင်း."""
+    """1 နာရီတစ်ခါ: night_hour (KST) ရောက်ရင် queue ထဲက file ကြီးတွေ ဒေါင်းမယ်.
+
+    night mode ပိတ်ထားရင်တော့ queue ထဲကျန်တာ အခုချက်ချင်း ဒေါင်းမယ်
+    (ပိတ်လိုက်တာနဲ့ စောင့်စရာမလိုတော့ဘူးလို့ ယူဆတယ်).
+    """
     kst_hour = (datetime.datetime.now(datetime.timezone.utc).hour + 9) % 24
     items = night_q.all()
     if not items:
@@ -862,12 +878,11 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
     remaining = []
     for uid, ulist in by_user.items():
         s = settings.get(uid)
-        if not (s["night"] and s["night_hour"] == kst_hour):
-            remaining.extend(ulist)
+        if s["night"] and s["night_hour"] != kst_hour:
+            remaining.extend(ulist)  # အချိန်မကျသေးဘူး — ဆက်စောင့်
             continue
         print(f"🌙 night queue processing for {uid}: {len(ulist)} items")
         with tempfile.TemporaryDirectory() as tmpdir:
-            loop = asyncio.get_running_loop()
             for it in ulist:
                 try:
                     kind, ref = it["kind"], it["ref"]
@@ -877,15 +892,22 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             continue
                         path = await download_tg_media(msg, f"{tmpdir}/n_", None)
                         final, as_audio = await post_process(
-                            path, media_kind(msg), uid, tmpdir, 0)
+                            path, media_kind(msg), uid, tmpdir, 0, use_trim=False)
                         await deliver(uid, it["chat_id"], final, msg.caption,
                                       media_kind(msg), as_audio, True)
                     else:
-                        path, title = await download_web(
-                            ref["url"], tmpdir, quality=s["quality"])
-                        final, as_audio = await post_process(path, "video", uid, tmpdir, 0)
+                        url = ref["url"]
+                        if looks_like_direct_file(url):
+                            path, title = await download_direct_file(url, tmpdir)
+                            wk = direct_file_kind(url)
+                        else:
+                            path, title = await download_web(
+                                url, tmpdir, quality=s["quality"])
+                            wk = "video"
+                        final, as_audio = await post_process(
+                            path, wk, uid, tmpdir, 0, use_trim=False)
                         await deliver(uid, it["chat_id"], final, title,
-                                      "video", as_audio, True)
+                                      wk, as_audio, wk == "video", log_kind="web")
                     try:
                         await bot_client.send_message(
                             it["chat_id"], f"🌙 ညဘက် download ပြီးပါပြီ: {it.get('label','')}")
