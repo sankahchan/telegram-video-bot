@@ -134,4 +134,31 @@ _dseg = _dseg.split("elif")[0]
 check("deliver renames extensionless photo",
       'path + ".jpg"' in _dseg and "os.rename" in _dseg)
 
+# --- 6. deterministic shortfall convergence ---------------------------------
+_conv_src = _helpers.get("_size_converged")
+if _conv_src is None:  # helper defined at module level, not nested
+    for _node in _ast.walk(_tree):
+        if isinstance(_node, _ast.FunctionDef) and _node.name == "_size_converged":
+            _conv_src = _ast.get_source_segment(src, _node)
+_cns = {}
+exec(_conv_src, _cns)
+_size_converged = _cns["_size_converged"]
+
+E = 53698533  # the real-world case: expected vs converged 53477376
+G = 53477376
+check("converged identical x3 -> True", _size_converged([G, G, G], E))
+check("converged x4 -> True", _size_converged([G, G, G, G], E))
+check("varying sizes -> False",
+      not _size_converged([G, G - 1000, G], E))
+check("only 2 attempts -> False", not _size_converged([G, G], E))
+check("exact match -> False", not _size_converged([E, E, E], E))
+check("far short (<95%) -> False",
+      not _size_converged([E // 2, E // 2, E // 2], E))
+check("just under 95% -> False",
+      not _size_converged([int(E * 0.94)] * 3, E))
+check("at 95% -> True",
+      _size_converged([int(E * 0.96)] * 3, E))
+check("expected=0 -> False", not _size_converged([G, G, G], 0))
+check("empty -> False", not _size_converged([], E))
+
 print(f"✅ v5.4.3 (photo fix): {len(PASS)} tests passed")

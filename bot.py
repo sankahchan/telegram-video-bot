@@ -1186,21 +1186,35 @@ async def fetch_message(chat_id, msg_id, _retried=False):
 async def download_tg_media(msg, dest, progress):
     """Telegram media download (fast parallel -> fallback normal).
 
-    Never delivers a truncated file silently: the final size is verified
-    against the message's file_size, with retries before giving up.
+    The final size is verified against the message's file_size, with retries
+    before giving up — but if every attempt converges on the IDENTICAL short
+    byte count, the shortfall is deterministic (Telegram serves fewer bytes
+    than file_size claims) rather than flaky, so the file is accepted with a
+    warning instead of failing forever.
     """
     media = media_of(msg)
     expected = getattr(media, "file_size", 0) or 0
+    got_sizes = []
+
+    def _size(path):
+        return os.path.getsize(path) if path and os.path.exists(path) else 0
 
     def _ok(path):
-        return not expected or (os.path.exists(path) and os.path.getsize(path) == expected)
+        return not expected or _size(path) == expected
+
+    def _note(path):
+        got_sizes.append(_size(path))
+        return _size_converged(got_sizes, expected)
 
     try:
         path = await fast_download(user, msg, dest, workers=DOWNLOAD_WORKERS, progress=progress)
+        converged = _note(path)
         if _ok(path):
             return path
-        got = os.path.getsize(path) if os.path.exists(path) else 0
-        print(f"⚠️ fast download size mismatch ({got} != {expected}) — normal download နဲ့ ပြန်စမ်းမယ်")
+        if converged:
+            print(f"⚠️ size converged at {_size(path)} != {expected} — server-side shortfall, accepting")
+            return path
+        print(f"⚠️ fast download size mismatch ({_size(path)} != {expected}) — normal download နဲ့ ပြန်စမ်းမယ်")
         if os.path.exists(path):
             os.remove(path)
     except Exception as e:
@@ -1212,9 +1226,13 @@ async def download_tg_media(msg, dest, progress):
             path = await user.download_media(msg, file_name=dest, progress=progress)
             if not path:
                 raise RuntimeError("download failed")
+            converged = _note(path)
             if _ok(path):
                 return path
-            last_err = (f"incomplete: {os.path.getsize(path)} != {expected} bytes")
+            if converged:
+                print(f"⚠️ size converged at {_size(path)} != {expected} — server-side shortfall, accepting")
+                return path
+            last_err = (f"incomplete: {_size(path)} != {expected} bytes")
             print(f"⚠️ {last_err} — retrying ({attempt + 1}/3)")
             os.remove(path)
         except Exception as e:
@@ -1222,6 +1240,22 @@ async def download_tg_media(msg, dest, progress):
             print(f"⚠️ normal download failed ({last_err}) — retrying ({attempt + 1}/3)")
         await asyncio.sleep(2 * (attempt + 1))
     raise RuntimeError(f"download မအောင်မြင်ပါ (3 ကြိမ် စမ်းပြီးပြီ): {last_err}")
+
+
+def _size_converged(sizes, expected, need=3, min_ratio=0.95):
+    """Deterministic server-side shortfall?
+
+    True when the last `need` attempts all delivered the identical byte
+    count — short of `expected` but within `min_ratio` of it. Identical
+    sizes across independent attempts mean Telegram itself serves that many
+    bytes (stale file_size field), not flaky network; varying sizes mean
+    real flakiness and must keep failing/retrying.
+    """
+    if not expected or len(sizes) < need:
+        return False
+    tail = sizes[-need:]
+    return (len(set(tail)) == 1 and tail[0] != expected
+            and tail[0] >= expected * min_ratio)
 
 
 async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
