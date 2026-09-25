@@ -131,7 +131,7 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
     raise RuntimeError(f"download မအောင်မြင်ပါ (3 ကြိမ် စမ်းပြီးပြီ): {last_err}")
 
 
-def _base_opts(outtmpl: str, fmt: str):
+def _base_opts(outtmpl: str, fmt: str, player_clients=None):
     opts = {
         "format": fmt,
         "outtmpl": outtmpl,
@@ -144,9 +144,11 @@ def _base_opts(outtmpl: str, fmt: str):
     }
     if os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
-    # YouTube client gating bypass: android client often returns formats
-    # when the web client is restricted for a datacenter IP.
-    opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
+    # NOTE: yt-dlp stops at the FIRST client that extracts without error,
+    # even if it returns zero formats — so clients are retried one-by-one
+    # in download_web(), not as a combined list here.
+    if player_clients:
+        opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
     return opts
 
 
@@ -197,21 +199,27 @@ async def _diagnose_formats(url: str) -> str:
     """Probe video info (no download) to explain an empty format list."""
     def _run():
         from yt_dlp import YoutubeDL
+        # ignore_no_formats_error: get the info dict even with zero formats
         opts = _base_opts("/tmp/yt_diag", "b")
-        opts.update({"skip_download": True})
+        opts.update({"skip_download": True, "ignore_no_formats_error": True})
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False) or {}
         except Exception as e:
-            return f"info probe failed: {type(e).__name__}"
-        n = len(info.get("formats") or [])
-        bits = [f"formats={n}"]
+            return f"info probe failed: {type(e).__name__}: {str(e)[:300]}"
+        fmts = info.get("formats") or []
+        bits = [f"formats={len(fmts)}"]
         if info.get("age_limit"):
             bits.append(f"age_limit={info['age_limit']}")
         if info.get("availability"):
             bits.append(f"availability={info['availability']}")
         if info.get("live_status"):
             bits.append(f"live={info['live_status']}")
+        if fmts:
+            sample = [f"{f.get('format_id')}:{f.get('ext')}:"
+                      f"{'url' if f.get('url') else 'nourl'}"
+                      for f in fmts[:6]]
+            bits.append("sample=[" + ",".join(sample) + "]")
         return "YouTube returned " + ", ".join(bits)
     try:
         return await asyncio.to_thread(_run)
@@ -243,8 +251,8 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
 
     outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
 
-    def _run(fmt):
-        opts = _base_opts(outtmpl, fmt)
+    def _run(fmt, player_clients):
+        opts = _base_opts(outtmpl, fmt, player_clients)
         if progress_cb and loop:
             opts["progress_hooks"] = [_hook(progress_cb, loop, tag)]
         with YoutubeDL(opts) as ydl:
@@ -263,21 +271,33 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             title = (info.get("title") or "video").strip()
             return path, title
 
-    last_err = None
-    for i, fmt in enumerate(fmts):
-        try:
-            path, title = await asyncio.to_thread(_run, fmt)
+    # yt-dlp stops at the first client that extracts without error even with
+    # zero formats, so try clients as separate full attempts (cheap: no
+    # download happens when formats are empty).
+    client_variants = [["android"], ["web"], ["tvhtml5"]]
+    result = None
+    for ci, clients in enumerate(client_variants):
+        for i, fmt in enumerate(fmts):
+            try:
+                result = await asyncio.to_thread(_run, fmt, clients)
+                break
+            except Exception as e:
+                if "Requested format is not available" not in str(e):
+                    raise
+                if i < len(fmts) - 1:
+                    print(f"⚠️ format '{fmt}' မရပါ — fallback '{fmts[i+1]}' နဲ့ ပြန်စမ်းမယ်")
+                    continue
+                if ci < len(client_variants) - 1:
+                    print(f"⚠️ client {clients} format မပေးပါ — "
+                          f"client {client_variants[ci+1]} နဲ့ ပြန်စမ်းမယ်")
+                break
+        if result:
             break
-        except Exception as e:
-            last_err = e
-            if "Requested format is not available" not in str(e):
-                raise
-            if i < len(fmts) - 1:
-                print(f"⚠️ format '{fmt}' မရပါ — fallback '{fmts[i+1]}' နဲ့ ပြန်စမ်းမယ်")
-                continue
-            # last fallback also blocked — diagnose the real cause
-            diag = await _diagnose_formats(url)
-            raise RuntimeError(f"Requested format is not available || {diag}") from e
+    if not result:
+        # every client returned zero formats — diagnose the real cause
+        diag = await _diagnose_formats(url)
+        raise RuntimeError(f"Requested format is not available || {diag}")
+    path, title = result
     if not path or not os.path.exists(path):
         raise RuntimeError("download ပြီးပေမယ့် file မတွေ့ပါ")
     return path, title
