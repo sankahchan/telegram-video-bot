@@ -12,3 +12,11 @@ venv/
 # OS / misc
 .DS_Store
 *.zip
+
+# Runtime data (per-install, never commit)
+/stats.json
+/users.json
+/watchlist.json
+/night_queue.json
+/settings.json
+/cookies.txt
