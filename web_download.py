@@ -351,7 +351,10 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     # yt-dlp stops at the first client that extracts without error even with
     # zero formats, so try clients as separate full attempts (cheap: no
     # download happens when formats are empty).
-    client_variants = [["android"], ["web"], ["tvhtml5"]]
+    # NOTE: client names must exist in yt-dlp's INNERTUBE_CLIENTS —
+    # "tvhtml5" was renamed to "tv"; unknown names are silently skipped!
+    client_variants = [["android"], ["web"], ["ios"], ["tv"],
+                      ["web_embedded"], ["mweb"]]
     result = None
     last_err: Exception | None = None
     for ci, clients in enumerate(client_variants):
