@@ -49,7 +49,8 @@ from store import StatsStore, UserStore, WatchStore, QueueStore, SettingsStore  
 from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
     download_direct_file, looks_like_direct_file, direct_file_kind,
-    pot_status,
+    pot_server_hint, storyboard_only, yt_pipeline_status,
+    _diagnose_formats,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
@@ -199,7 +200,8 @@ HELP_OVERVIEW = (
     "/adduser /deluser /users — owner only\n"
     "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
     "/xtimeline — X profile ရဲ့ latest video တွေ\n"
-    "/clearcache — file_id cache ရှင်း (owner only)"
+    "/clearcache — file_id cache ရှင်း (owner only)\n"
+    "/ytcheck [url] — YouTube pipeline စစ် (owner only)"
 )
 
 HELP_TOPICS = {
@@ -353,6 +355,18 @@ HELP_TOPICS = {
         "  /clearcache\n\n"
         "→ ဖျက်လိုက်တဲ့ entry အရေအတွက်ကို ပြမယ်"
     ),
+    "ytcheck": (
+        "🔍 /ytcheck — YouTube pipeline စစ်ဆေးချက် (owner only)\n\n"
+        "VPS ပေါ်မှာ YouTube ဒေါင်းဖို့ လိုအပ်ချက်တွေ အကုန် စစ်ပေးမယ်:\n"
+        "yt-dlp version, PO-token plugin, PO-token server, cookies.\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /ytcheck\n"
+        "  /ytcheck <youtube-url>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /ytcheck https://youtu.be/d33A264UMqo\n\n"
+        "→ URL ပေးရင် အဲဒီ video ကို probe လုပ်ပြီး format diagnosis�ါ ပြမယ်.\n"
+        "YouTube မရတိုင်း ဒါကို အရင် run ပြီး ရလဒ် ပို့ပေးပါ."
+    ),
     "xtimeline": (
         "🐦 /xtimeline — X profile ရဲ့ latest video tweets ဒေါင်း\n\n"
         "အသုံးပြုပုံ / Usage:\n"
@@ -430,6 +444,14 @@ def original_filename(msg, kind: str, tag) -> str:
         ext = ".ogg"  # voice messages; mimetypes would give .oga
     else:
         ext = mimetypes.guess_extension(mime) if mime else None
+    if not ext and kind == "photo":
+        # Telegram Photo objects carry no file_name/mime_type, but photos are
+        # always JPEG. Without an extension send_photo() fails with
+        # PHOTO_EXT_INVALID.
+        ext = ".jpg"
+    if not ext and kind == "video_note":
+        # VideoNote objects likewise carry no file_name/mime_type (mp4).
+        ext = ".mp4"
     base = {"video": "video", "audio": "audio", "voice": "voice",
             "photo": "photo", "video_note": "video_note",
             "animation": "animation", "doc": "document"}.get(kind, "file")
@@ -440,21 +462,6 @@ def friendly_web_error(e: Exception) -> str | None:
     """Raw yt-dlp errors -> short bilingual fix guide (None = no special case)."""
     s = str(e)
     if "confirm you're not a bot" in s:
-        pot_hint = ""
-        try:
-            if not pot_status():
-                pot_hint = (
-                    "\n\n💡 PO-token server မရှိသေးပါ — ဒါ YouTube block ကို "
-                    "free နည်း ဖြေရှင်းပေးတာပါ. VPS မှာ run ပါ:\n"
-                    "  docker run -d --restart unless-stopped \\\n"
-                    "    --name pot-provider -p 127.0.0.1:4416:4416 \\\n"
-                    "    brainicism/bgutil-ytdlp-pot-provider\n"
-                    "ပြီးရင်: sudo systemctl restart tg-video-bot\n\n"
-                    "The free PO-token server isn't running on the VPS. Run the "
-                    "Docker command above, restart the bot, then resend the link."
-                )
-        except Exception:
-            pass
         return (
             "❌ YouTube က ဒီ VPS ကို bot အဖြစ် သတ်မှတ်ပြီး block ထားပါတယ်.\n\n"
             "ပြင်နည်း — browser cookies တင်ပေးပါ:\n"
@@ -468,12 +475,14 @@ def friendly_web_error(e: Exception) -> str | None:
             "desktop browser, export youtube.com cookies with the \"Get cookies.txt\" "
             "extension, and upload it as cookies_youtube.txt (or cookies.txt) "
             "under /opt/tg-video-bot/ on the VPS, then resend the link."
-            + pot_hint
+            + pot_server_hint()
         )
     if "Requested format is not available" in s:
         extra = ""
         if "||" in s:
             extra = "\n\n🔍 စစ်ဆေးချက်: " + s.split("||", 1)[1].strip()
+        # storyboard-only / empty formats = missing PO token signature
+        hint = pot_server_hint() if storyboard_only(s) else ""
         return (
             "❌ YouTube က ဒီ video အတွက် download format မပေးပါ.\n"
             "ဖြစ်နိုင်ချေများ:\n"
@@ -481,7 +490,7 @@ def friendly_web_error(e: Exception) -> str | None:
             "  (bash /opt/tg-video-bot/update.sh)\n"
             "• video က age-restricted / region-blocked / members-only\n"
             "• VPS IP ကို YouTube က ခဏ limit လုပ်ထားနိုင် — ခဏကြာမှ ပြန်စမ်းပါ"
-            + extra +
+            + extra + hint +
             "\n\n"
             "YouTube isn't offering a downloadable format for this video. "
             "Try updating yt-dlp via update.sh on the VPS; the video itself "
@@ -822,6 +831,48 @@ async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "INVITE_HASH_EXPIRED" in msg or "INVITE_HASH_INVALID" in msg:
             hint = "\n💡 invite link သက်တမ်း ကုန်နေတာ (သို့) မှားနေတာ ဖြစ်နိုင်ပါတယ်."
         await wait.edit_text(f"❌ Join မရပါ: {msg}{hint}")
+
+
+async def ytcheck_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: YouTube download pipeline diagnostics on the VPS.
+
+    အသုံးပြုပုံ: /ytcheck [youtube-url]
+    URL ပေးရင် အဲဒီ video ကို probe လုပ်ပြီး format diagnosis�ါ ပြမယ်.
+    """
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
+        return
+    st = yt_pipeline_status()
+    L = ["🔍 YouTube pipeline စစ်ဆေးချက် (VPS):", ""]
+    L.append(f"• yt-dlp: {st['ytdlp']}")
+    if st["pot_plugin"]:
+        L.append(f"• PO-token plugin: ✅ installed ({st['pot_plugin']})")
+    else:
+        L.append("• PO-token plugin: ❌ မရှိပါ — update.sh run ပေးပါ\n"
+                 "  (bash /opt/tg-video-bot/update.sh)")
+    if st["pot_server"]:
+        L.append(f"• PO-token server: ✅ reachable ({st['pot_url']})")
+    else:
+        L.append(f"• PO-token server: ❌ down ({st['pot_url']})")
+        L.append("  run: docker run -d --restart unless-stopped "
+                 "--name pot-provider -p 127.0.0.1:4416:4416 "
+                 "brainicism/bgutil-ytdlp-pot-provider")
+    if st["cookies"]:
+        L.append(f"• cookies: ✅ {st['cookies']}")
+    else:
+        L.append("• cookies: ❌ မရှိပါ — cookies_youtube.txt တင်ပေးပါ")
+    url = (context.args[0] if context.args else "").strip()
+    if url and ("youtube.com" in url or "youtu.be" in url):
+        wait = await update.message.reply_text("\n".join(L) + "\n\n⏳ probe လုပ်နေပါတယ်...")
+        diag = await _diagnose_formats(url)
+        L += ["", "🔍 probe: " + diag]
+        await wait.edit_text("\n".join(L))
+    elif url:
+        L.append("\n⚠️ YouTube URL မဟုတ်လို့ probe ကျော်လိုက်ပါတယ်.")
+        await update.message.reply_text("\n".join(L))
+    else:
+        L.append("\n💡 URL ပါ ပေးရင် probe လုပ်ပေးမယ်: /ytcheck <youtube-url>")
+        await update.message.reply_text("\n".join(L))
 
 
 async def clearcache_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1226,6 +1277,12 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
             duration=meta.get("duration", 0) or 0)
         sent_kind = "audio"
     elif kind == "photo" and mode == "video":
+        # Telegram rejects extensionless/invalid photo uploads with
+        # PHOTO_EXT_INVALID — guarantee a valid image extension.
+        if os.path.splitext(path)[1].lower() not in (".jpg", ".jpeg", ".png"):
+            fixed = path + ".jpg"
+            os.rename(path, fixed)
+            path = fixed
         sent = await bot_client.send_photo(chat_id, path, caption=caption)
         sent_kind = "photo"
     elif kind == "video_note":
@@ -1774,6 +1831,7 @@ def main():
         ("adduser", adduser_cmd), ("deluser", deluser_cmd), ("users", users_cmd),
         ("trim", trim_cmd), ("find", find_cmd), ("join", join_cmd),
         ("xtimeline", xtimeline_cmd), ("clearcache", clearcache_cmd),
+        ("ytcheck", ytcheck_cmd),
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))

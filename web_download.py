@@ -58,6 +58,78 @@ def pot_status() -> bool:
     return _pot_available()
 
 
+def pot_server_hint() -> str:
+    """Bilingual hint to run the PO-token server ('' when it's reachable).
+
+    Storyboard-only / empty YouTube format lists are the signature of a
+    missing PO token — every YouTube error branch with that signature
+    should append this hint.
+    """
+    try:
+        if pot_status():
+            return ""
+    except Exception:
+        pass
+    return (
+        "\n\n💡 PO-token server မရှိသေးပါ — YouTube က video stream တွေ "
+        "ထုတ်မပေးတာ ဒီနည်းနဲ့ free ဖြေရှင်းလို့ရပါတယ်. VPS မှာ run ပါ:\n"
+        "  docker run -d --restart unless-stopped \\\n"
+        "    --name pot-provider -p 127.0.0.1:4416:4416 \\\n"
+        "    brainicism/bgutil-ytdlp-pot-provider\n"
+        "ပြီးရင်: sudo systemctl restart tg-video-bot\n"
+        "ပြီးရင် link ပြန်ပို့ပါ — /ytcheck နဲ့ server တက်မတက် စစ်လို့ရပါတယ်.\n\n"
+        "The free PO-token server isn't running on the VPS — that's why "
+        "YouTube withholds the video streams. Run the Docker command above "
+        "on the VPS, restart the bot, then resend the link."
+    )
+
+
+def storyboard_only(err_text: str) -> bool:
+    """Does the error's format diagnosis show the PO-token signature?
+
+    YouTube served the page (public video) but withheld every playable
+    stream — only storyboards (sb0..sb3, mhtml) or nothing came back.
+    err_text is the full exception string, which embeds the "||" diagnosis.
+    """
+    diag = err_text.split("||", 1)[1] if "||" in err_text else err_text
+    low = diag.lower()
+    if "formats=0" in low:
+        return True
+    m = re.search(r"sample=\[([^\]]*)\]", diag)
+    if not m:
+        return False
+    ids = [p.split(":")[0].strip().lower()
+           for p in m.group(1).split(",") if p.strip()]
+    return bool(ids) and all(i.startswith("sb") for i in ids)
+
+
+def yt_pipeline_status() -> dict:
+    """VPS-side YouTube pipeline state for /ytcheck. No downloads."""
+    st: dict = {}
+    try:
+        import yt_dlp
+        st["ytdlp"] = yt_dlp.version.__version__
+    except Exception as e:
+        st["ytdlp"] = f"missing ({e})"
+    try:
+        import importlib.metadata as md
+        st["pot_plugin"] = md.version("bgutil-ytdlp-pot-provider")
+    except Exception:
+        st["pot_plugin"] = None
+    try:
+        st["pot_server"] = bool(pot_status())
+    except Exception:
+        st["pot_server"] = False
+    st["pot_url"] = POT_PROVIDER_URL
+    ck = _cookie_for("https://www.youtube.com/watch?v=probe")
+    if ck and os.path.exists(ck):
+        age_d = (time.time() - os.path.getmtime(ck)) / 86400
+        st["cookies"] = f"{os.path.basename(ck)} ({age_d:.0f} days old)"
+    else:
+        st["cookies"] = None
+    return st
+
+
 def _pot_available() -> bool:
     """PO-token provider server reachable? Re-probed at most once a minute.
 
@@ -366,6 +438,19 @@ async def _diagnose_formats(url: str) -> str:
             return f"info probe failed: {type(e).__name__}: {str(e)[:300]}"
         fmts = info.get("formats") or []
         bits = [f"formats={len(fmts)}"]
+        # environment context — explains WHY streams may be missing
+        # (storyboard-only + pot=down is the missing-PO-token signature)
+        try:
+            bits.append(f"pot={'ok' if _pot_available() else 'down'}")
+        except Exception:
+            bits.append("pot=unknown")
+        ck = _cookie_for(url)
+        bits.append(f"cookies={(os.path.basename(ck) if ck else 'none')}")
+        try:
+            import yt_dlp
+            bits.append(f"ytdlp={yt_dlp.version.__version__}")
+        except Exception:
+            pass
         if info.get("age_limit"):
             bits.append(f"age_limit={info['age_limit']}")
         if info.get("availability"):
