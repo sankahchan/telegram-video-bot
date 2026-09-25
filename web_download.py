@@ -144,6 +144,9 @@ def _base_opts(outtmpl: str, fmt: str):
     }
     if os.path.exists(COOKIE_FILE):
         opts["cookiefile"] = COOKIE_FILE
+    # YouTube client gating bypass: android client often returns formats
+    # when the web client is restricted for a datacenter IP.
+    opts["extractor_args"] = {"youtube": {"player_client": ["android", "web"]}}
     return opts
 
 
@@ -206,18 +209,18 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         )
 
     if audio_only:
-        fmt = "ba/b"
+        fmts = ["ba/b", "b"]
     elif quality == "low":
-        fmt = "bv*[height<=720]+ba/b/b[height<=720]/b"
+        fmts = ["bv*[height<=720]+ba/b/b[height<=720]/b", "b[height<=720]/b", "b"]
     else:
-        fmt = "bv*+ba/b"
+        fmts = ["bv*+ba/b", "b"]
 
     outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
-    opts = _base_opts(outtmpl, fmt)
-    if progress_cb and loop:
-        opts["progress_hooks"] = [_hook(progress_cb, loop, tag)]
 
-    def _run():
+    def _run(fmt):
+        opts = _base_opts(outtmpl, fmt)
+        if progress_cb and loop:
+            opts["progress_hooks"] = [_hook(progress_cb, loop, tag)]
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             if not info:
@@ -234,7 +237,19 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             title = (info.get("title") or "video").strip()
             return path, title
 
-    path, title = await asyncio.to_thread(_run)
+    last_err = None
+    for i, fmt in enumerate(fmts):
+        try:
+            path, title = await asyncio.to_thread(_run, fmt)
+            break
+        except Exception as e:
+            last_err = e
+            if "Requested format is not available" in str(e) and i < len(fmts) - 1:
+                print(f"⚠️ format '{fmt}' မရပါ — fallback '{fmts[i+1]}' နဲ့ ပြန်စမ်းမယ်")
+                continue
+            raise
+    else:
+        raise last_err
     if not path or not os.path.exists(path):
         raise RuntimeError("download ပြီးပေမယ့် file မတွေ့ပါ")
     return path, title

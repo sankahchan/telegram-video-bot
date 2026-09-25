@@ -19,6 +19,8 @@ echo "🔍 Code စစ်နေပါတယ်..."
   || { echo "❌ Code error တွေ့လို့ restart မလုပ်ပါ — အဟောင်း ဆက်� run နေမယ်."; exit 1; }
 echo "📚 Dependencies update..."
 ./venv/bin/pip install -q -r requirements.txt
+# YouTube က ခဏခဏ ပြောင်းလို့ yt-dlp ကို latest ထားမှ ရမယ်
+./venv/bin/pip install -q -U yt-dlp
 echo "🎬 ffmpeg စစ်နေပါတယ်..."
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "📥 ffmpeg မဆိသေးလို့ install လုပ်နေပါတယ်..."

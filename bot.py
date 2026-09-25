@@ -415,6 +415,17 @@ def friendly_web_error(e: Exception) -> str | None:
             "extension, and upload it as /opt/tg-video-bot/cookies.txt on the VPS, "
             "then resend the link."
         )
+    if "Requested format is not available" in s:
+        return (
+            "❌ YouTube က ဒီ video အတွက် download format မပေးပါ.\n"
+            "ဖြစ်နိုင်ချေများ:\n"
+            "• yt-dlp version အဟောင်း — VPS မှာ update.sh ပြန် run ပေးပါ\n"
+            "  (bash /opt/tg-video-bot/update.sh)\n"
+            "• video က age-restricted / region-blocked / members-only\n\n"
+            "YouTube isn't offering a downloadable format for this video. "
+            "Try updating yt-dlp via update.sh on the VPS; the video itself "
+            "may also be age-restricted, region-blocked, or members-only."
+        )
     return None
 
 
