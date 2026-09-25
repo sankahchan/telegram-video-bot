@@ -610,14 +610,25 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
     s = st(uid)
     mode = s["mode"]
     caption = build_caption(caption)
+    from media_tools import probe_video
     if as_audio:
-        await bot_client.send_audio(chat_id, path, caption=caption)
+        meta = await asyncio.to_thread(probe_video, path)
+        await bot_client.send_audio(
+            chat_id, path, caption=caption,
+            duration=meta.get("duration", 0) or 0)
     elif kind == "photo" and mode == "video":
         await bot_client.send_photo(chat_id, path, caption=caption)
     elif kind == "video_note":
         await bot_client.send_video_note(chat_id, path)
     elif as_video and mode == "video":
-        await bot_client.send_video(chat_id, path, caption=caption)
+        # Pass real dimensions so Telegram shows the original aspect ratio
+        # (w=0/h=0 makes clients render a square bubble).
+        meta = await asyncio.to_thread(probe_video, path)
+        await bot_client.send_video(
+            chat_id, path, caption=caption,
+            width=meta.get("width", 0) or 0,
+            height=meta.get("height", 0) or 0,
+            duration=meta.get("duration", 0) or 0)
     else:
         await bot_client.send_document(chat_id, path, caption=caption)
     if s["save"]:

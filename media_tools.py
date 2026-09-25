@@ -1,8 +1,10 @@
-"""ffmpeg helpers: audio extraction, trim, compress."""
+"""ffmpeg helpers: audio extraction, trim, compress, probe."""
 import asyncio
+import json
 import os
 import re
 import shutil
+import subprocess
 
 
 def has_ffmpeg() -> bool:
@@ -92,3 +94,44 @@ def parse_trim_args(args) -> tuple:
     if len(args) != 2:
         raise ValueError("အသုံးပြုပုံ: /trim <အစ> <အဆုံး>  (ဥပမာ /trim 0:10 0:45)")
     return parse_ts(args[0]), parse_ts(args[1])
+
+
+def probe_video(path: str) -> dict:
+    """ffprobe -> {'width': w, 'height': h, 'duration': secs}.
+
+    Rotation metadata (phone videos) is accounted for: 90/270 deg swaps w/h.
+    Returns {} when ffprobe is missing or probing fails — callers must
+    fall back to 0s (previous behavior).
+    """
+    if not shutil.which("ffprobe"):
+        return {}
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=width,height",
+             "-show_entries", "stream_tags=rotate",
+             "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        info = json.loads(proc.stdout or "{}")
+        width = height = 0
+        for st in info.get("streams") or []:
+            if st.get("width"):
+                width = int(st["width"] or 0)
+                height = int(st.get("height") or 0)
+                try:
+                    rot = int((st.get("tags") or {}).get("rotate") or 0)
+                except (TypeError, ValueError):
+                    rot = 0
+                if rot in (90, 270):
+                    width, height = height, width
+                break
+        duration = 0
+        try:
+            duration = int(float((info.get("format") or {}).get("duration") or 0))
+        except (TypeError, ValueError):
+            pass
+        return {"width": width, "height": height, "duration": duration}
+    except Exception:
+        return {}
