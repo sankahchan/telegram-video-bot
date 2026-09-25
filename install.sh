@@ -114,6 +114,36 @@ fi
 rm -f session_string.txt tmp_session.session*
 
 echo ""
+echo "🍪 Cookie files (optional — login လိုတဲ့ site တွေအတွက်)"
+echo "   ရှိရင် file path ထည့်ပါ, မရှိရင် Enter နှိပ်"
+echo "   (နောက်မှ scp နဲ့ $INSTALL_DIR/ ကို တင်လို့ရပါတယ်)"
+for f in cookies.txt cookies_youtube.txt cookies_instagram.txt cookies_twitter.txt; do
+  read -rp "  $f path (Enter=skip): " CPATH
+  if [ -n "$CPATH" ] && [ -f "$CPATH" ]; then
+    cp "$CPATH" "$INSTALL_DIR/$f"
+    chmod 600 "$INSTALL_DIR/$f"
+    echo "  ✅ $f ထည့်ပြီးပါပြီ"
+  elif [ -n "$CPATH" ]; then
+    echo "  ⚠️ file မတွေ့ပါ: $CPATH — skip"
+  fi
+done
+
+echo ""
+echo "🧩 YouTube PO-token provider (optional — YouTube 'not a bot' block ဖြေရှင်းဖို့)"
+echo "   bgutil server run ထားရင် URL ထည့်ပါ, မရှိရင် Enter နှိပ် (နောက်မှ ပြင်လို့ရ)"
+echo "   server run ရန် (Docker):"
+echo "     docker run --name bgutil-provider -d --init -p 127.0.0.1:4416:4416 \\"
+echo "       brainicism/bgutil-ytdlp-pot-provider"
+read -rp "  POT_PROVIDER_URL [Enter=skip]: " POT_URL
+if [ -n "$POT_URL" ]; then
+  ./venv/bin/python -c "
+from dotenv import set_key
+set_key('.env', 'POT_PROVIDER_URL', '''$POT_URL'''.strip())
+print('  ✅ POT_PROVIDER_URL သိမ်းပြီးပါပြီ')
+"
+fi
+
+echo ""
 echo "⚙️ systemd service သွင်းနေပါတယ်..."
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]

@@ -10,8 +10,64 @@ import asyncio
 import os
 import re
 
+from x_media import XMediaError, extract_x_media, is_x_url
+
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(DATA_DIR, "cookies.txt")
+
+# --- v5.4.0: per-site cookie files + proxy + PO-token provider ---------------
+# cookies_<site>.txt ရှိရင် အဲဒါကို သုံးမယ်, မရှိရင် cookies.txt (backward compat)
+SITE_COOKIES = (
+    (("youtube.com", "youtu.be"), "cookies_youtube.txt"),
+    (("instagram.com",), "cookies_instagram.txt"),
+    (("x.com", "twitter.com"), "cookies_twitter.txt"),
+)
+
+# YouTube PO-token provider (bgutil-ytdlp-pot-provider) — VPS IP "not a bot"
+# block ကို ဖြေရှင်းဖို့. server မရှိရင် တိတ်တဆိတ် ကျော်မယ်.
+POT_PROVIDER_URL = os.environ.get("POT_PROVIDER_URL",
+                                  "http://127.0.0.1:4416").strip()
+# Paid residential proxy (durable YouTube fallback) — ဥပမာ:
+# YTDLP_PROXY=socks5://user:pass@host:port
+YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
+
+
+def _cookie_for(url: str) -> str | None:
+    lu = (url or "").lower()
+    for hosts, fname in SITE_COOKIES:
+        if any(h in lu for h in hosts):
+            p = os.path.join(DATA_DIR, fname)
+            return p if os.path.exists(p) else (
+                COOKIE_FILE if os.path.exists(COOKIE_FILE) else None)
+    return COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
+
+
+def _is_youtube(url: str) -> bool:
+    lu = (url or "").lower()
+    return "youtube.com" in lu or "youtu.be" in lu
+
+
+_pot_ok = None  # process-level reachability cache
+
+
+def _pot_available() -> bool:
+    """PO-token provider server reachable? (cached, silent fallback)."""
+    global _pot_ok
+    if _pot_ok is not None:
+        return _pot_ok
+    _pot_ok = False
+    if POT_PROVIDER_URL:
+        try:
+            import socket
+            import urllib.parse
+            u = urllib.parse.urlparse(POT_PROVIDER_URL)
+            with socket.create_connection(
+                    (u.hostname or "127.0.0.1", u.port or 80), timeout=2):
+                _pot_ok = True
+                print(f"✅ PO-token provider ရှိပါတယ် ({POT_PROVIDER_URL})")
+        except Exception as e:
+            print(f"ℹ️ PO-token provider မရှိပါ ({POT_PROVIDER_URL}): {e}")
+    return _pot_ok
 
 # http(s) links that are NOT t.me
 WEB_URL_RE = re.compile(r"https?://[^\s<>\"]+")
@@ -140,7 +196,7 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
     raise RuntimeError(f"download မအောင်မြင်ပါ (3 ကြိမ် စမ်းပြီးပြီ): {last_err}")
 
 
-def _base_opts(outtmpl: str, fmt: str, player_clients=None):
+def _base_opts(outtmpl: str, fmt: str, player_clients=None, url=""):
     opts = {
         "format": fmt,
         "outtmpl": outtmpl,
@@ -151,14 +207,36 @@ def _base_opts(outtmpl: str, fmt: str, player_clients=None):
         "retries": 3,
         "noplaylist": True,
     }
-    if os.path.exists(COOKIE_FILE):
-        opts["cookiefile"] = COOKIE_FILE
+    ck = _cookie_for(url)
+    if ck:
+        opts["cookiefile"] = ck
+    if YTDLP_PROXY:
+        opts["proxy"] = YTDLP_PROXY
     # NOTE: yt-dlp stops at the FIRST client that extracts without error,
     # even if it returns zero formats — so clients are retried one-by-one
     # in download_web(), not as a combined list here.
+    ea = {}
     if player_clients:
-        opts["extractor_args"] = {"youtube": {"player_client": player_clients}}
+        ea["youtube"] = {"player_client": player_clients}
+    # YouTube PO-token provider (bgutil) — official extractor arg form:
+    #   youtubepot-bgutilhttp:base_url=<url>
+    if _is_youtube(url) and _pot_available():
+        ea["youtubepot-bgutilhttp"] = {"base_url": POT_PROVIDER_URL}
+    if ea:
+        opts["extractor_args"] = ea
     return opts
+
+
+def cookie_file_for(url: str) -> str | None:
+    """Public helper (tests/docs): which cookie file applies to this URL."""
+    return _cookie_for(url)
+
+
+def pot_extractor_args(url: str) -> dict:
+    """Public helper (tests): PO-token extractor_args for a YouTube URL."""
+    if _is_youtube(url) and POT_PROVIDER_URL and _pot_available():
+        return {"youtubepot-bgutilhttp": {"base_url": POT_PROVIDER_URL}}
+    return {}
 
 
 def _hook(progress_cb, loop, tag):
@@ -186,8 +264,13 @@ async def probe_size(url: str):
     """Return approx file size in MB (None if unknown). No download."""
     def _run():
         from yt_dlp import YoutubeDL
-        with YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True,
-                        **({"cookiefile": COOKIE_FILE} if os.path.exists(COOKIE_FILE) else {})}) as ydl:
+        opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+        ck = _cookie_for(url)
+        if ck:
+            opts["cookiefile"] = ck
+        if YTDLP_PROXY:
+            opts["proxy"] = YTDLP_PROXY
+        with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
                 return None
@@ -261,7 +344,7 @@ async def _diagnose_formats(url: str) -> str:
     def _run():
         from yt_dlp import YoutubeDL
         # ignore_no_formats_error: get the info dict even with zero formats
-        opts = _base_opts("/tmp/yt_diag", "b")
+        opts = _base_opts("/tmp/yt_diag", "b", url=url)
         opts.update({"skip_download": True, "ignore_no_formats_error": True})
         try:
             with YoutubeDL(opts) as ydl:
@@ -286,6 +369,14 @@ async def _diagnose_formats(url: str) -> str:
         return await asyncio.to_thread(_run)
     except Exception as e:
         return f"diagnosis failed: {e}"
+
+
+def _pick_x_video(items: list) -> dict:
+    """First video item from cascade results (photos fall through to yt-dlp)."""
+    videos = [i for i in items if i.get("kind") == "video"]
+    if not videos:
+        raise XMediaError("no_media", "video မတွေ့ပါ (photo ပဲ ရှိ)")
+    return videos[0]
 
 
 async def download_web(url: str, tmpdir: str, quality: str = "high",
@@ -319,6 +410,22 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             "or Facebook may be login-walling the VPS IP. Make sure your "
             "cookies.txt (exported while logged into Facebook) is on the VPS.")
 
+    # X/Twitter: no-login cascade (FxTwitter -> VxTwitter -> syndication)
+    # BEFORE yt-dlp. It sees age-restricted tweets yt-dlp can't; yt-dlp
+    # (with cookies) stays as the final fallback below.
+    x_error = None
+    if is_x_url(url):
+        try:
+            item = _pick_x_video(await extract_x_media(url))
+            path, _t = await download_direct_file(
+                item["url"], tmpdir, progress_cb=progress_cb,
+                loop=loop, tag=tag)
+            title = (item.get("title") or "x_video").strip() or "x_video"
+            return path, title
+        except XMediaError as e:
+            x_error = e
+            print(f"⚠️ X cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
+
     if audio_only:
         fmts = ["ba/b", "b"]
     elif quality == "low":
@@ -329,7 +436,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
 
     def _run(fmt, player_clients):
-        opts = _base_opts(outtmpl, fmt, player_clients)
+        opts = _base_opts(outtmpl, fmt, player_clients, url)
         if progress_cb and loop:
             opts["progress_hooks"] = [_hook(progress_cb, loop, tag)]
         with YoutubeDL(opts) as ydl:
@@ -375,6 +482,12 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         if result:
             break
     if not result:
+        # X: cascade taxonomy is authoritative for not_found/private/
+        # rate_limited/age_restricted — report it directly instead of the
+        # generic yt-dlp message.
+        if x_error is not None and x_error.kind in (
+                "not_found", "private", "rate_limited", "age_restricted"):
+            raise RuntimeError(f"X_MEDIA:{x_error.kind}:{x_error}")
         # every client failed — diagnose the real cause
         diag = await _diagnose_formats(url)
         raise RuntimeError(

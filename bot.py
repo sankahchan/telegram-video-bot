@@ -51,6 +51,8 @@ from web_download import (  # noqa: E402
     download_direct_file, looks_like_direct_file, direct_file_kind,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video  # noqa: E402
+from filecache import FileIdCache, make_key  # noqa: E402
+from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 
 from pyrogram import Client as PyroClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -105,6 +107,7 @@ user_store = UserStore()
 watches = WatchStore()
 night_q = QueueStore()
 settings = SettingsStore()
+fcache = FileIdCache()  # URL -> Telegram file_id (instant repeat delivery)
 
 # In-memory pending states
 pending_trim = {}      # uid -> (start_sec, end_sec)
@@ -169,7 +172,9 @@ WELCOME = (
     "/nightmode [on|off] [နာရီ] — file ကြီးတွေ ညဘက်ဒေါင်း\n"
     "/save [on|off] — Saved Messages ထဲ auto-save\n"
     "/stats — download stats\n"
-    "/adduser /deluser /users — (owner only)\n\n"
+    "/adduser /deluser /users — (owner only)\n"
+    "/xtimeline @user [n] — X profile ရဲ့ latest video တွေ\n"
+    "/clearcache — file_id cache ရှင်း (owner only)\n\n"
     "📖 အသေးစိတ်: /help <command>  (ဥပမာ /help quality)\n\n"
     "⚠️ Login ဝင်ထားတဲ့ account က channel/group ရဲ့ member ဖြစ်နေရပါမယ်."
 )
@@ -191,7 +196,9 @@ HELP_OVERVIEW = (
     "/unwatch /watchlist\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
-    "/join — VPS account ကို channel join ခိုင်း (owner only)"
+    "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
+    "/xtimeline — X profile ရဲ့ latest video တွေ\n"
+    "/clearcache — file_id cache ရှင်း (owner only)"
 )
 
 HELP_TOPICS = {
@@ -336,6 +343,25 @@ HELP_TOPICS = {
         "  /join https://t.me/+AbCdEfGhIjKlMnOp\n\n"
         "→ join ပြီးရင် link ပြန်ပို့ပြီး ဒေါင်းလို့ရပြီ"
     ),
+    "clearcache": (
+        "🧹 /clearcache — file_id cache ရှင်း (owner only)\n\n"
+        "တစ်ခါဒေါင်းဖူးတဲ့ link တွေကို bot က Telegram file_id နဲ့ မှတ်ထားပြီး\n"
+        "နောက်တစ်ခါ ပြန်ဒေါင်းစရာမလိုဘဲ ချက်ချင်းပို့တယ်. cache က 30 ရက်\n"
+        "ကြာရင် အလိုအလျောက် ပျက်မယ်.\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /clearcache\n\n"
+        "→ ဖျက်လိုက်တဲ့ entry အရေအတွက်ကို ပြမယ်"
+    ),
+    "xtimeline": (
+        "🐦 /xtimeline — X profile ရဲ့ latest video tweets ဒေါင်း\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /xtimeline @username [အရေအတွက်]\n\n"
+        "ဥပမာ / Example:\n"
+        "  /xtimeline @NASA 5\n\n"
+        "• public account ပဲ ရမယ် (private/protected မရ)\n"
+        "• အရေအတွက် 1–10 (default 5)\n"
+        "• တွေ့တဲ့ video tweet တွေကို ပုံမှန် download flow နဲ့ ပို့မယ်"
+    ),
 }
 
 
@@ -419,12 +445,13 @@ def friendly_web_error(e: Exception) -> str | None:
             "1️⃣ ကွန်ပျူတာ browser မှာ YouTube ကို login ဝင်ထားပါ\n"
             "2️⃣ \"Get cookies.txt\" extension နဲ့ youtube.com အတွက် cookies ထုတ်ပါ\n"
             "3️⃣ ရလာတဲ့ cookies.txt ကို VPS ပေါ်မှာ\n"
-            "     /opt/tg-video-bot/cookies.txt အဖြစ် တင်ပါ\n"
+            "     /opt/tg-video-bot/cookies_youtube.txt (သို့)\n"
+            "     cookies.txt အဖြစ် တင်ပါ\n"
             "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
             "YouTube is blocking this VPS as a bot. Fix: log into YouTube in a "
             "desktop browser, export youtube.com cookies with the \"Get cookies.txt\" "
-            "extension, and upload it as /opt/tg-video-bot/cookies.txt on the VPS, "
-            "then resend the link."
+            "extension, and upload it as cookies_youtube.txt (or cookies.txt) "
+            "under /opt/tg-video-bot/ on the VPS, then resend the link."
         )
     if "Requested format is not available" in s:
         extra = ""
@@ -453,7 +480,8 @@ def friendly_web_error(e: Exception) -> str | None:
             "1️⃣ ကွန်ပျူတာ browser မှာ Instagram ကို login ဝင်ထားပါ\n"
             "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
             "   (instagram.com cookies ပါရမယ်)\n"
-            "3️⃣ /opt/tg-video-bot/cookies.txt အဖြစ် VPS ပေါ်တင်ပါ\n"
+            "3️⃣ VPS ပေါ် /opt/tg-video-bot/cookies_instagram.txt (သို့)\n"
+            "   cookies.txt အဖြစ် တင်ပါ\n"
             "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
             "This Instagram reel isn't available to everyone — it may be "
             "private/audience-restricted, or Instagram may be login-walling "
@@ -468,12 +496,51 @@ def friendly_web_error(e: Exception) -> str | None:
             "1️⃣ ကွန်ပျူတာ browser မှာ X ကို login ဝင်ထားပါ\n"
             "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
             "   (x.com cookies ပါရမယ်)\n"
-            "3️⃣ /opt/tg-video-bot/cookies.txt အဖြစ် VPS ပေါ်တင်ပါ\n"
+            "3️⃣ VPS ပေါ် /opt/tg-video-bot/cookies_twitter.txt (သို့)\n"
+            "   cookies.txt အဖြစ် တင်ပါ\n"
             "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
             "This X video is unavailable — it's age-restricted or needs login. "
             "Fix: export cookies.txt while logged into X and upload it as "
-            "/opt/tg-video-bot/cookies.txt on the VPS."
+            "cookies_twitter.txt (or cookies.txt) under /opt/tg-video-bot/ "
+            "on the VPS."
         )
+    if s.startswith("X_MEDIA:"):
+        parts = s.split(":", 2)
+        xkind = parts[1] if len(parts) > 1 else "no_media"
+        if xkind == "not_found":
+            return (
+                "❌ ဒီ X post ကို ရှာမတွေ့ပါ — ဖျက်လိုက်တာ (သို့) link မှား"
+                "နေတာ ဖြစ်နိုင်ပါတယ်.\n\n"
+                "This X post was not found — it may have been deleted, or "
+                "the link is wrong."
+            )
+        if xkind == "private":
+            return (
+                "❌ ဒီ X post က private/protected account ကပါ — login မပါဘဲ "
+                "ရယူလို့မရပါ.\n\n"
+                "This X post is from a private/protected account and can't be "
+                "fetched without login."
+            )
+        if xkind == "rate_limited":
+            return (
+                "❌ X က ခဏ rate-limit ချထားပါတယ် — ၁-၂ မိနစ်ကြာမှ "
+                "ပြန်စမ်းပါ.\n\n"
+                "X is rate-limiting requests right now — please try again "
+                "in a minute or two."
+            )
+        if xkind == "age_restricted":
+            return (
+                "❌ ဒီ X video က age-restricted (sensitive) content ပါ.\n\n"
+                "ပြင်နည်း — X cookies တင်ပေးပါ:\n"
+                "1️⃣ ကွန်ပျူတာ browser မှာ X ကို login ဝင်ထားပါ\n"
+                "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
+                "3️⃣ VPS ပေါ် /opt/tg-video-bot/cookies_twitter.txt (သို့)\n"
+                "   cookies.txt အဖြစ် တင်ပါ\n"
+                "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
+                "This X video is age-restricted (sensitive). Fix: export "
+                "cookies.txt while logged into X and upload it as "
+                "cookies_twitter.txt (or cookies.txt) under /opt/tg-video-bot/."
+            )
     return None
 
 
@@ -738,6 +805,57 @@ async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "INVITE_HASH_EXPIRED" in msg or "INVITE_HASH_INVALID" in msg:
             hint = "\n💡 invite link သက်တမ်း ကုန်နေတာ (သို့) မှားနေတာ ဖြစ်နိုင်ပါတယ်."
         await wait.edit_text(f"❌ Join မရပါ: {msg}{hint}")
+
+
+async def clearcache_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: file_id cache ရှင်း (30 ရက် TTL အလိုအလျောက်ပျက်)."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
+        return
+    n = fcache.clear()
+    await update.message.reply_text(
+        f"🧹 file_id cache ရှင်းပြီးပါပြီ — {n} entry ဖျက်လိုက်တယ်.\n"
+        f"Cache cleared — {n} entries removed.")
+
+
+async def xtimeline_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """X profile ရဲ့ latest video tweets တွေ ဒေါင်း: /xtimeline @NASA 5."""
+    if not allowed(update):
+        return
+    args = context.args or []
+    username, n = parse_timeline_args(args)
+    if not username:
+        if not args:
+            await update.message.reply_text(
+                "အသုံးပြုပုံ / Usage:\n"
+                "  /xtimeline @username [အရေအတွက်]\n\n"
+                "ဥပမာ / Example:\n"
+                "  /xtimeline @NASA 5\n\n"
+                "• public account ပဲ ရမယ် (private/protected မရ)\n"
+                "• အရေအတွက် 1–10 (default 5)")
+        else:
+            await update.message.reply_text(
+                "❌ username မှားနေပါတယ် — ဥပမာ /xtimeline @NASA 5\n"
+                "Invalid username — e.g. /xtimeline @NASA 5")
+        return
+    wait = await update.message.reply_text(
+        f"⏳ @{username} ရဲ့ နောက်ဆုံး video {n} ခု ရှာနေပါတယ်...\n"
+        f"Fetching @{username}'s latest {n} videos...")
+    try:
+        ids = await fetch_x_timeline(username, n)
+    except Exception as e:
+        await wait.edit_text(f"❌ X timeline မရပါ:\n{str(e)[:300]}")
+        return
+    if not ids:
+        await wait.edit_text(
+            f"ℹ️ @{username} ရဲ့ နောက်ဆုံး post တွေထဲမှာ video မတွေ့ပါ.\n"
+            f"No videos in @{username}'s latest posts.")
+        return
+    await wait.edit_text(
+        f"✅ {len(ids)} ခု တွေ့ပြီ — ဒေါင်းနေပါတယ်...\n"
+        f"Found {len(ids)} — downloading...")
+    urls = [f"https://x.com/i/status/{i}" for i in ids]
+    await handle_link(update, context, text="\n".join(urls), prompt=False)
 
 
 async def trim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1072,33 +1190,56 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
 
 
 async def deliver(uid: int, chat_id: int, path: str, caption: str,
-                  kind: str, as_audio: bool, as_video: bool, log_kind: str = "tg"):
-    """Bot ကနေ ပို့ + Saved Messages (optional) + stats."""
+                  kind: str, as_audio: bool, as_video: bool, log_kind: str = "tg",
+                  cache_key: str | None = None):
+    """Bot ကနေ ပို့ + Saved Messages (optional) + stats.
+
+    cache_key ပေးရင် ပို့ပြီးရင် Telegram file_id ကို fileid cache မှာ
+    သိမ်းမယ် (နောက်တစ်ခါ ချက်ချင်းပြန်ပို့နိုင်ဖို့).
+    """
     s = st(uid)
     mode = s["mode"]
     caption = build_caption(caption)
+    sent, file_id, sent_kind = None, None, kind
     if as_audio or (kind == "audio" and mode == "video"):
         # MP3-extracted or Telegram audio/voice message -> proper audio bubble
         meta = await asyncio.to_thread(probe_video, path)
-        await bot_client.send_audio(
+        sent = await bot_client.send_audio(
             chat_id, path, caption=caption,
             duration=meta.get("duration", 0) or 0)
+        sent_kind = "audio"
     elif kind == "photo" and mode == "video":
-        await bot_client.send_photo(chat_id, path, caption=caption)
+        sent = await bot_client.send_photo(chat_id, path, caption=caption)
+        sent_kind = "photo"
     elif kind == "video_note":
-        await bot_client.send_video_note(chat_id, path)
+        sent = await bot_client.send_video_note(chat_id, path)
+        sent_kind = "video_note"
     elif as_video and kind == "video" and mode == "video":
         # Pass real dimensions so Telegram shows the original aspect ratio
         # (w=0/h=0 makes clients render a square bubble).
         meta = await asyncio.to_thread(probe_video, path)
-        await bot_client.send_video(
+        sent = await bot_client.send_video(
             chat_id, path, caption=caption,
             width=meta.get("width", 0) or 0,
             height=meta.get("height", 0) or 0,
             duration=meta.get("duration", 0) or 0)
+        sent_kind = "video"
     else:
         # documents (PDF/ZIP/...) and anything else -> plain file
-        await bot_client.send_document(chat_id, path, caption=caption)
+        sent = await bot_client.send_document(chat_id, path, caption=caption)
+        sent_kind = "document"
+    if sent is not None and cache_key:
+        try:
+            media = {"audio": getattr(sent, "audio", None),
+                     "photo": (getattr(sent, "photo", None) or [None])[-1],
+                     "video_note": getattr(sent, "video_note", None),
+                     "video": getattr(sent, "video", None),
+                     "document": getattr(sent, "document", None)}.get(sent_kind)
+            file_id = getattr(media, "file_id", None)
+            if file_id:
+                fcache.set(cache_key, file_id, sent_kind, caption)
+        except Exception as e:
+            print(f"⚠️ cache store failed: {e}")
     if s["save"]:
         try:
             await user.send_document("me", path, caption=caption)
@@ -1108,6 +1249,29 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
         stats.log(os.path.getsize(path) / 1048576, log_kind, uid)
     except Exception:
         pass
+
+
+async def deliver_cached(uid: int, chat_id: int, entry: dict, caption: str):
+    """file_id cache hit — ပြန်ဒေါင်းစရာမလိုဘဲ ချက်ချင်းပို့."""
+    caption = build_caption(caption or entry.get("caption", ""))
+    kind, fid = entry.get("kind"), entry.get("file_id")
+    s = st(uid)
+    if kind == "audio":
+        await bot_client.send_audio(chat_id, fid, caption=caption)
+    elif kind == "photo":
+        await bot_client.send_photo(chat_id, fid, caption=caption)
+    elif kind == "video_note":
+        await bot_client.send_video_note(chat_id, fid)
+    elif kind == "video" and s["mode"] == "video":
+        await bot_client.send_video(chat_id, fid, caption=caption)
+    else:
+        await bot_client.send_document(chat_id, fid, caption=caption)
+
+
+def _cache_eligible(uid: int) -> bool:
+    """file_id cache သုံးလို့ရလား — zip/mp3/trim ပါရင် output တူမှာမဟုတ်လို့ မသုံး."""
+    s = st(uid)
+    return not (s.get("zip") or s.get("mp3") or uid in pending_trim)
 
 
 def _swallow(fut):
@@ -1305,6 +1469,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                              "quality": quality or s["quality"]})
                                 queued += 1
                                 continue
+                            # file_id cache hit? -> ပြန်ဒေါင်းစရာမလို
+                            t_ckey = None
+                            if _cache_eligible(uid):
+                                t_ckey = make_key("tg", str(cid), str(wmsg.id),
+                                                  quality or s["quality"], s["mode"])
+                                hit = fcache.get(t_ckey)
+                                if hit:
+                                    await status.edit_text(
+                                        f"{tag} ⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
+                                    await deliver_cached(uid, chat_id, hit, wmsg.caption)
+                                    ok += 1
+                                    print(f"⚡ tg cache hit -> {uid}")
+                                    continue
                             path = await download_tg_media(
                                 wmsg, os.path.join(tmpdir, original_filename(wmsg, wk, wtag)),
                                 make_tg_progress(status, tag, loop))
@@ -1316,7 +1493,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             else:
                                 await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
                                 await deliver(uid, chat_id, final, wmsg.caption,
-                                              wk, as_audio, wk == "video")
+                                              wk, as_audio, wk == "video",
+                                              cache_key=t_ckey)
                             ok += 1
                             print(f"✅ tg ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
                         except Exception as e:
@@ -1341,6 +1519,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             queued += 1
                             continue
                     # PDF / direct file -> plain HTTP download; else yt-dlp
+                    cache_ckey = None
+                    if _cache_eligible(uid):
+                        cache_ckey = make_key("web", url, quality or s["quality"],
+                                              s["mode"])
+                        hit = fcache.get(cache_ckey)
+                        if hit:
+                            await status.edit_text(
+                                f"{tag} ⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
+                            await deliver_cached(uid, chat_id, hit, url)
+                            ok += 1
+                            print(f"⚡ web cache hit ({idx}/{n}) -> {uid}")
+                            continue
                     if looks_like_direct_file(url):
                         path, title = await download_direct_file(
                             url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
@@ -1365,7 +1555,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     else:
                         await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
                         await deliver(uid, chat_id, final, title, wk, as_audio,
-                                      wk == "video", log_kind="web")
+                                      wk == "video", log_kind="web",
+                                      cache_key=cache_ckey)
                     ok += 1
                     print(f"✅ web ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
             except Exception as e:
@@ -1479,15 +1670,34 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                         msg, _, err = await fetch_message(ref["chat"], ref["msg"])
                         if not msg or not media_of(msg):
                             continue
+                        n_ckey = None
+                        if _cache_eligible(uid):
+                            n_ckey = make_key("tg", str(ref["chat"]), str(ref["msg"]),
+                                              nq, s["mode"])
+                            hit = fcache.get(n_ckey)
+                            if hit:
+                                await deliver_cached(uid, it["chat_id"], hit,
+                                                     msg.caption)
+                                print(f"⚡ night tg cache hit -> {uid}")
+                                continue
                         path = await download_tg_media(
                             msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), "n")), None)
                         final, as_audio = await post_process(
                             path, media_kind(msg), uid, tmpdir, 0,
                             use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, msg.caption,
-                                      media_kind(msg), as_audio, media_kind(msg) == "video")
+                                      media_kind(msg), as_audio, media_kind(msg) == "video",
+                                      cache_key=n_ckey)
                     else:
                         url = ref["url"]
+                        n_ckey = None
+                        if _cache_eligible(uid):
+                            n_ckey = make_key("web", url, nq, s["mode"])
+                            hit = fcache.get(n_ckey)
+                            if hit:
+                                await deliver_cached(uid, it["chat_id"], hit, url)
+                                print(f"⚡ night web cache hit -> {uid}")
+                                continue
                         if looks_like_direct_file(url):
                             path, title = await download_direct_file(url, tmpdir)
                             wk = direct_file_kind(url)
@@ -1498,7 +1708,8 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                         final, as_audio = await post_process(
                             path, wk, uid, tmpdir, 0, use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, title,
-                                      wk, as_audio, wk == "video", log_kind="web")
+                                      wk, as_audio, wk == "video", log_kind="web",
+                                      cache_key=n_ckey)
                     try:
                         await bot_client.send_message(
                             it["chat_id"], f"🌙 ညဘက် download ပြီးပါပြီ: {it.get('label','')}")
@@ -1545,6 +1756,7 @@ def main():
         ("nightmode", nightmode_cmd), ("stats", stats_cmd),
         ("adduser", adduser_cmd), ("deluser", deluser_cmd), ("users", users_cmd),
         ("trim", trim_cmd), ("find", find_cmd), ("join", join_cmd),
+        ("xtimeline", xtimeline_cmd), ("clearcache", clearcache_cmd),
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))

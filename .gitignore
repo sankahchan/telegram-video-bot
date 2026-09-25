@@ -20,3 +20,7 @@ venv/
 /night_queue.json
 /settings.json
 /cookies.txt
+/cookies_youtube.txt
+/cookies_instagram.txt
+/cookies_twitter.txt
+/fileid_cache.json

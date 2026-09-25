@@ -30,9 +30,15 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 📦 `/zip` — send a batch as one ZIP archive
 - ✂️ `/trim <start> <end>` — cut a video segment (e.g. `/trim 0:10 0:45`)
 - 🔍 `/find <channel> <keyword>` — search media in a channel, tap number to download
+- 🐦 **X/Twitter no-login cascade** — FxTwitter → VxTwitter → syndication CDN before yt-dlp (works for age-restricted tweets yt-dlp can't see); `/xtimeline @user [n]` downloads latest videos from a public profile
+- 🧩 **YouTube PO-token provider** (optional) — `bgutil-ytdlp-pot-provider` server to beat YouTube "not a bot" blocks on VPS IPs (`POT_PROVIDER_URL`)
+- ⚡ **file_id cache** — repeat links are re-sent instantly from Telegram's servers, no re-download; `/clearcache` (owner only), entries auto-expire after 30 days
+- 🍪 **Per-site cookies** — `cookies_youtube.txt` / `cookies_instagram.txt` / `cookies_twitter.txt` (fallback: shared `cookies.txt`); **proxy** support via `YTDLP_PROXY` (e.g. `socks5://user:pass@host:port`)
 
 > 📌 Instagram/Facebook **private** content (stories etc.) needs login cookies:
 > export `cookies.txt` (browser extension "Get cookies.txt") and place it next to `bot.py`.
+> Per-site cookies are also supported: `cookies_youtube.txt`, `cookies_instagram.txt`, `cookies_twitter.txt`
+> (used for that site when present, otherwise the shared `cookies.txt`).
 
 ## 🚀 Run on VPS 24/7 (one command)
 
@@ -83,6 +89,27 @@ Get `BOT_TOKEN`: [@BotFather](https://t.me/BotFather) → /newbot
 | `SESSION_STRING` | Your user session (via `generate_session.py`) |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot |
 | `DOWNLOAD_WORKERS` | Parallel download connections (default 8) |
+| `POT_PROVIDER_URL` | YouTube PO-token provider server (optional, default `http://127.0.0.1:4416`) |
+| `YTDLP_PROXY` | Proxy for yt-dlp downloads (optional, e.g. `socks5://user:pass@host:port`) |
+
+### YouTube PO-token provider (optional)
+
+YouTube often blocks VPS IPs ("confirm you're not a bot"). A local
+[bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+server can generate PO tokens that lift the block. Bind it to **localhost only**
+— it has no auth:
+
+```bash
+docker run --name bgutil-provider -d --init \
+  -p 127.0.0.1:4416:4416 \
+  brainicism/bgutil-ytdlp-pot-provider
+```
+
+The bot auto-detects the server at `POT_PROVIDER_URL` (default `http://127.0.0.1:4416`);
+if it's not running, the bot silently falls back to the normal flow.
+If YouTube still blocks after this, a residential proxy (`YTDLP_PROXY`) is the
+durable fallback — typically a paid service (~$3–10/month). Neither option
+guarantees success; YouTube may still block aggressively-flagged IPs.
 
 ## 🚀 Speed tips
 
@@ -102,6 +129,9 @@ Get `BOT_TOKEN`: [@BotFather](https://t.me/BotFather) → /newbot
 | File | Purpose |
 |---|---|
 | `bot.py` | Main bot |
+| `web_download.py` | yt-dlp web downloads, PO-token, proxy, per-site cookies |
+| `x_media.py` | X/Twitter no-login cascade + timeline scraping |
+| `filecache.py` | URL → Telegram file_id cache |
 | `generate_session.py` | Create user session string |
 | `install.sh` | VPS one-command installer |
 | `update.sh` | Update bot from GitHub on VPS |
