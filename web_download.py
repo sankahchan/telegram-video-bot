@@ -15,6 +15,7 @@ import subprocess
 import time
 
 from x_media import XMediaError, extract_x_media, is_x_url
+from tiktok_media import TikTokMediaError, extract_tiktok_media, is_tiktok_url
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(DATA_DIR, "cookies.txt")
@@ -25,6 +26,7 @@ SITE_COOKIES = (
     (("youtube.com", "youtu.be"), "cookies_youtube.txt"),
     (("instagram.com",), "cookies_instagram.txt"),
     (("x.com", "twitter.com"), "cookies_twitter.txt"),
+    (("tiktok.com",), "cookies_tiktok.txt"),
 )
 
 # YouTube PO-token provider (bgutil-ytdlp-pot-provider) — VPS IP "not a bot"
@@ -247,8 +249,17 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
                 name = urllib.parse.unquote(m.group(1))
             name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip() or "file"
             if "." not in name:
-                ct = resp.headers.get("Content-Type", "")
-                name += ".pdf" if "pdf" in ct else ".bin"
+                ct = (resp.headers.get("Content-Type", "") or "").lower()
+                if "pdf" in ct:
+                    name += ".pdf"
+                elif "video/mp4" in ct or ct.startswith("video/"):
+                    name += ".mp4"
+                elif "audio/mpeg" in ct or "audio/mp3" in ct:
+                    name += ".mp3"
+                elif ct.startswith("audio/"):
+                    name += ".m4a"
+                else:
+                    name += ".bin"
             path = os.path.join(tmpdir, name)
             done = 0
             with open(path, "wb") as f:
@@ -648,6 +659,29 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             x_error = e
             print(f"⚠️ X cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
 
+    # TikTok: tikwm cascade BEFORE yt-dlp. TikTok's webpage often returns
+    # "Unexpected response from webpage request" for datacenter IPs — tikwm
+    # fetches from its own servers and returns watermark-free video.
+    # yt-dlp (with cookies) stays as the fallback below.
+    tiktok_error = None
+    if is_tiktok_url(url):
+        try:
+            item = extract_tiktok_media(url)
+            path, _t = await download_direct_file(
+                item["url"], tmpdir, progress_cb=progress_cb,
+                loop=loop, tag=tag)
+            ok, reason = await asyncio.to_thread(verify_web_video, path)
+            if not ok:
+                raise TikTokMediaError(
+                    "network", f"TikTok cascade download corrupt: {reason}")
+            if not audio_only:
+                path = await asyncio.to_thread(normalize_web_video, path)
+            title = (item.get("title") or "tiktok_video").strip() or "tiktok_video"
+            return path, title
+        except TikTokMediaError as e:
+            tiktok_error = e
+            print(f"⚠️ TikTok cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
+
     if audio_only:
         fmts = ["ba/b", "b"]
     elif quality == "low":
@@ -739,6 +773,10 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         if x_error is not None and x_error.kind in (
                 "not_found", "private", "rate_limited", "age_restricted"):
             raise RuntimeError(f"X_MEDIA:{x_error.kind}:{x_error}")
+        # TikTok: same — tikwm's verdict beats yt-dlp's generic error.
+        if tiktok_error is not None and tiktok_error.kind in (
+                "not_found", "private", "rate_limited"):
+            raise RuntimeError(f"TIKTOK_MEDIA:{tiktok_error.kind}:{tiktok_error}")
         # every client failed — diagnose the real cause
         diag = await _diagnose_formats(url)
         raise RuntimeError(

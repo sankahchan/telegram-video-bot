@@ -567,6 +567,55 @@ def friendly_web_error(e: Exception) -> str | None:
                 "cookies.txt while logged into X and upload it as "
                 "cookies_twitter.txt (or cookies.txt) under /opt/tg-video-bot/."
             )
+    if s.startswith("TIKTOK_MEDIA:"):
+        parts = s.split(":", 2)
+        tkind = parts[1] if len(parts) > 1 else "network"
+        if tkind == "not_found":
+            return (
+                "❌ ဒီ TikTok video ကို ရှာမတွေ့ပါ — ဖျက်လိုက်တာ (သို့) link "
+                "မှားနေတာ ဖြစ်နိုင်ပါတယ်.\n\n"
+                "This TikTok video was not found — it may have been deleted, "
+                "or the link is wrong."
+            )
+        if tkind == "private":
+            return (
+                "❌ ဒီ TikTok video က private ပါ — login မပါဘဲ ရယူလို့"
+                "မရပါ.\n\n"
+                "ပြင်နည်း — TikTok cookies တင်ပေးပါ:\n"
+                "1️⃣ ကွန်ပျူတာ browser မှာ TikTok ကို login ဝင်ထားပါ\n"
+                "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
+                "3️⃣ VPS ပေါ် /opt/tg-video-bot/cookies_tiktok.txt (သို့)\n"
+                "   cookies.txt အဖြစ် တင်ပါ\n"
+                "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
+                "This TikTok video is private. Fix: export cookies.txt while "
+                "logged into TikTok and upload it as cookies_tiktok.txt "
+                "(or cookies.txt) under /opt/tg-video-bot/."
+            )
+        if tkind == "rate_limited":
+            return (
+                "❌ TikTok download service က ခဏ rate-limit ချထားပါတယ် — "
+                "၁-၂ မိနစ်ကြာမှ ပြန်စမ်းပါ.\n\n"
+                "The TikTok download service is rate-limiting requests right "
+                "now — please try again in a minute or two."
+            )
+    if "Unexpected response from webpage request" in s and "tiktok" in s.lower():
+        return (
+            "❌ TikTok က ဒီ VPS ရဲ့ request ကို block လုပ်ထားပါတယ် "
+            "(bot စစ်ဆေးမှု).\n"
+            "အလိုအလျောက် နည်းလမ်း (tikwm) လည်း အခု မရသေးပါ.\n\n"
+            "ပြင်နည်း — TikTok cookies တင်ပေးပါ:\n"
+            "1️⃣ ကွန်ပျူတာ browser မှာ TikTok ကို login ဝင်ထားပါ\n"
+            "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
+            "   (tiktok.com cookies ပါရမယ်)\n"
+            "3️⃣ VPS ပေါ် /opt/tg-video-bot/cookies_tiktok.txt (သို့)\n"
+            "   cookies.txt အဖြစ် တင်ပါ\n"
+            "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
+            "TikTok is blocking this VPS's requests (bot detection), and the "
+            "automatic fallback is also unavailable right now. Fix: log into "
+            "TikTok in a desktop browser, export cookies with the \"Get "
+            "cookies.txt\" extension, and upload it as cookies_tiktok.txt "
+            "(or cookies.txt) under /opt/tg-video-bot/, then resend the link."
+        )
     return None
 
 

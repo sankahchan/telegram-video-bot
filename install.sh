@@ -117,7 +117,7 @@ echo ""
 echo "🍪 Cookie files (optional — login လိုတဲ့ site တွေအတွက်)"
 echo "   ရှိရင် file path ထည့်ပါ, မရှိရင် Enter နှိပ်"
 echo "   (နောက်မှ scp နဲ့ $INSTALL_DIR/ ကို တင်လို့ရပါတယ်)"
-for f in cookies.txt cookies_youtube.txt cookies_instagram.txt cookies_twitter.txt; do
+for f in cookies.txt cookies_youtube.txt cookies_instagram.txt cookies_twitter.txt cookies_tiktok.txt; do
   read -rp "  $f path (Enter=skip): " CPATH
   if [ -n "$CPATH" ] && [ -f "$CPATH" ]; then
     cp "$CPATH" "$INSTALL_DIR/$f"

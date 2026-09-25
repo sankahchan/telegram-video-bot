@@ -33,13 +33,13 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 🐦 **X/Twitter no-login cascade** — FxTwitter → VxTwitter → syndication CDN before yt-dlp (works for age-restricted tweets yt-dlp can't see); `/xtimeline @user [n]` downloads latest videos from a public profile
 - 🧩 **YouTube PO-token provider** (optional) — `bgutil-ytdlp-pot-provider` server to beat YouTube "not a bot" blocks on VPS IPs (`POT_PROVIDER_URL`)
 - ⚡ **file_id cache** — repeat links are re-sent instantly from Telegram's servers, no re-download; `/clearcache` (owner only), entries auto-expire after 30 days
-- 🍪 **Per-site cookies** — `cookies_youtube.txt` / `cookies_instagram.txt` / `cookies_twitter.txt` (fallback: shared `cookies.txt`); **proxy** support via `YTDLP_PROXY` (e.g. `socks5://user:pass@host:port`)
+- 🍪 **Per-site cookies** — `cookies_youtube.txt` / `cookies_instagram.txt` / `cookies_twitter.txt` / `cookies_tiktok.txt` (fallback: shared `cookies.txt`); **proxy** support via `YTDLP_PROXY` (e.g. `socks5://user:pass@host:port`)
 - 🛡️ **Download integrity check** — every web video is ffprobe-verified after download (truncated/corrupt files are auto-retried, never silently sent); soundless videos get a silent audio track so Telegram shows them as video instead of GIF
 - 🎞️ **H.264 normalization** — Instagram/YouTube serve VP9/AV1 which iOS Telegram can't decode (frozen frame + audio). Web videos are normalized to H.264 + AAC + faststart before sending; H.264 sources are stream-copied (no re-encode)
 
 > 📌 Instagram/Facebook **private** content (stories etc.) needs login cookies:
 > export `cookies.txt` (browser extension "Get cookies.txt") and place it next to `bot.py`.
-> Per-site cookies are also supported: `cookies_youtube.txt`, `cookies_instagram.txt`, `cookies_twitter.txt`
+> Per-site cookies are also supported: `cookies_youtube.txt`, `cookies_instagram.txt`, `cookies_twitter.txt`, `cookies_tiktok.txt`
 > (used for that site when present, otherwise the shared `cookies.txt`).
 
 ## 🚀 Run on VPS 24/7 (one command)
