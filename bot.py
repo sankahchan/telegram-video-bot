@@ -467,22 +467,39 @@ def friendly_web_error(e: Exception) -> str | None:
 
 
 def friendly_peer_error(err: str | None) -> str | None:
-    """'Peer id invalid' -> bilingual no-access guide (None = not a peer error)."""
-    if not err or "Peer id invalid" not in err:
+    """Peer errors -> bilingual guide (None = not a peer error).
+
+    - NOT_A_MEMBER: bot ရဲ့ account က channel/group member မဟုတ် -> join ခိုင်း
+    - ကျန် Peer id invalid: member ဖြစ်ပြီးသားကို ခဏတာ resolve မရတာ ->
+      ပြန်ပို့ခိုင်း (transient)
+    """
+    if not err:
         return None
-    return (
-        "❌ ဒီ channel/group ကို access မရှိပါ.\n"
-        "• Bot ကို run နေတဲ့ Telegram account (VPS ပေါ်မှာ login ဝင်ထားတဲ့\n"
-        "  account) က ဒီ channel/group ရဲ့ member ဖြစ်ရမယ်\n"
-        "• ⚠️ bot ကို နှိပ်နေတဲ့သူ member ဖြစ်ရုံနဲ့ မရပါ — bot က\n"
-        "  သူ့ကိုယ်ပိုင် account နဲ့ ဒေါင်းတာပါ\n"
-        "• Private channel/group ဆို အဲဒီ account က အရင် join (သို့)\n"
-        "  invite ယူထားရမယ်\n\n"
-        "No access to this channel/group. The Telegram account the bot itself "
-        "runs as (logged in on the VPS) must be a member — it downloads with "
-        "its own account, not yours. Join the private channel/group with that "
-        "account first, then resend the link."
-    )
+    if "NOT_A_MEMBER" in err:
+        return (
+            "❌ ဒီ channel/group ကို access မရှိပါ.\n"
+            "• Bot ကို run နေတဲ့ Telegram account (VPS ပေါ်မှာ login ဝင်ထားတဲ့\n"
+            "  account) က ဒီ channel/group ရဲ့ member ဖြစ်ရမယ်\n"
+            "• ⚠️ bot ကို နှိပ်နေတဲ့သူ member ဖြစ်ရုံနဲ့ မရပါ — bot က\n"
+            "  သူ့ကိုယ်ပိုင် account နဲ့ ဒေါင်းတာပါ\n"
+            "• Private channel/group ဆို အဲဒီ account က အရင် join (သို့)\n"
+            "  invite ယူထားရမယ်\n\n"
+            "No access to this channel/group. The Telegram account the bot itself "
+            "runs as (logged in on the VPS) must be a member — it downloads with "
+            "its own account, not yours. Join the private channel/group with that "
+            "account first, then resend the link."
+        )
+    if "Peer id invalid" in err:
+        return (
+            "⚠️ Telegram နဲ့ ခဏတာ ဆက်သွယ်မှု error တက်သွားပါတယ်.\n"
+            "👉 link ကို ပြန်ပို့ပေးပါ — ခဏနေရင် ရနိုင်ပါတယ်.\n"
+            "ထပ်ခါထပ်ခါ မရရင် VPS မှာ bot ကို restart လုပ်ပါ:\n"
+            "  sudo systemctl restart tg-video-bot\n\n"
+            "Temporary Telegram connection issue. Please resend the link — "
+            "it often works on retry. If it keeps failing, restart the bot "
+            "on the VPS."
+        )
+    return None
 
 
 def build_caption(text: str) -> str:
@@ -853,8 +870,30 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------- core flow
+async def _peer_in_dialogs(chat_id) -> bool | None:
+    """chat_id dialogs ထဲမှာ ရှိမရှိ စစ်.
+
+    True = member (access ရှိ), False = member မဟုတ်,
+    None = scan မအောင်မြင် (မသိသေးဘူး).
+    """
+    try:
+        async for d in user.get_dialogs():
+            if getattr(getattr(d, "chat", None), "id", None) == chat_id:
+                return True
+        return False
+    except Exception as e:
+        print(f"⚠️ dialogs scan မအောင်မြင်: {e}")
+        return None
+
+
 async def fetch_message(chat_id, msg_id, _retried=False):
-    """Message ကို တိုက်ရိုက်ရှာမယ် (linked chat fallback + dialogs sync retry)."""
+    """Message ကို တိုက်ရိုက်ရှာမယ် (linked chat fallback + dialogs sync retry).
+
+    Peer id invalid ဖြစ်ရင် dialogs ထဲမှာ member ဟုတ်/မဟုတ် အတိအကျစစ်တယ်:
+    - member မဟုတ် -> "NOT_A_MEMBER" (join ခိုင်းတဲ့ guide ပြမယ်)
+    - member ဖြစ်ပြီးသား -> peer cache refresh + ပြန်စမ်း (transient bug ကို
+      self-heal); အားလုံးမရမှ technical error ပြမယ်.
+    """
     tried = []
     candidates = [chat_id]
     try:
@@ -865,6 +904,22 @@ async def fetch_message(chat_id, msg_id, _retried=False):
             print(f"🔗 linked chat တွေ့ပြီ: {linked.id}")
     except Exception as e:
         tried.append(f"get_chat({chat_id}): {type(e).__name__}: {e}")
+        if "Peer id invalid" in str(e):
+            in_dialogs = await _peer_in_dialogs(chat_id)
+            if in_dialogs is False:
+                return None, None, "NOT_A_MEMBER"
+            if in_dialogs is True:
+                # member ဖြစ်ပြီးသား — scan က peer cache refresh လုပ်ပြီးပြီ
+                try:
+                    chat = await user.get_chat(chat_id)
+                    linked = getattr(chat, "linked_chat", None)
+                    if linked and linked.id not in candidates:
+                        candidates.append(linked.id)
+                        print(f"🔗 linked chat တွေ့ပြီ: {linked.id}")
+                    print(f"✅ peer refresh အောင်မြင်: {chat_id}")
+                except Exception as e2:
+                    tried.append(f"get_chat retry({chat_id}): {type(e2).__name__}: {e2}")
+            # in_dialogs None (scan မအောင်) -> အောက်မှာ ဆက်ကြိုးစား
 
     for cid in candidates:
         try:
@@ -878,8 +933,8 @@ async def fetch_message(chat_id, msg_id, _retried=False):
             traceback.print_exc()
 
     err = " | ".join(tried)
-    if not _retried and "Peer id invalid" in err:
-        print("🔄 Peer မသိသေးလို့ dialogs sync လုပ်နေပါတယ်...")
+    if not _retried and "Peer id invalid" in err and "NOT_A_MEMBER" not in err:
+        print("🔄 Peer မသိသေးလို့ full dialogs sync + တစ်ကြိမ်ထပ်စမ်းမယ်...")
         try:
             async for _ in user.get_dialogs():
                 pass
