@@ -449,6 +449,20 @@ def friendly_web_error(e: Exception) -> str | None:
             "the VPS IP. Fix: export cookies.txt while logged into Instagram "
             "and upload it as /opt/tg-video-bot/cookies.txt on the VPS."
         )
+    if "[twitter]" in s and "unavailable" in s.lower():
+        return (
+            "❌ ဒီ X video ကို ရယူလို့မရပါ — age-restricted (သို့) login "
+            "လိုအပ်တဲ့ content ဖြစ်ပါတယ်.\n\n"
+            "ပြင်နည်း — X cookies တင်ပေးပါ:\n"
+            "1️⃣ ကွန်ပျူတာ browser မှာ X ကို login ဝင်ထားပါ\n"
+            "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
+            "   (x.com cookies ပါရမယ်)\n"
+            "3️⃣ /opt/tg-video-bot/cookies.txt အဖြစ် VPS ပေါ်တင်ပါ\n"
+            "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
+            "This X video is unavailable — it's age-restricted or needs login. "
+            "Fix: export cookies.txt while logged into X and upload it as "
+            "/opt/tg-video-bot/cookies.txt on the VPS."
+        )
     return None
 
 
