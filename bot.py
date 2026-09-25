@@ -432,6 +432,23 @@ def friendly_web_error(e: Exception) -> str | None:
             "Try updating yt-dlp via update.sh on the VPS; the video itself "
             "may also be age-restricted, region-blocked, or members-only."
         )
+    if "isn't available to everyone" in s or "can't be seen by certain audiences" in s:
+        return (
+            "❌ ဒီ Instagram reel က လူတိုင်းကြည့်လို့မရတဲ့ content ပါ.\n"
+            "ဖြစ်နိုင်ချေများ:\n"
+            "• account က private / reel က audience-restricted (age/country)\n"
+            "• Instagram က VPS IP ကို login တောင်းနေတာ\n\n"
+            "ပြင်နည်း — Instagram cookies တင်ပေးပါ:\n"
+            "1️⃣ ကွန်ပျူတာ browser မှာ Instagram ကို login ဝင်ထားပါ\n"
+            "2️⃣ \"Get cookies.txt\" extension နဲ့ cookies ထုတ်ပါ\n"
+            "   (instagram.com cookies ပါရမယ်)\n"
+            "3️⃣ /opt/tg-video-bot/cookies.txt အဖြစ် VPS ပေါ်တင်ပါ\n"
+            "4️⃣ ပြီးရင် link ပြန်ပို့ပါ\n\n"
+            "This Instagram reel isn't available to everyone — it may be "
+            "private/audience-restricted, or Instagram may be login-walling "
+            "the VPS IP. Fix: export cookies.txt while logged into Instagram "
+            "and upload it as /opt/tg-video-bot/cookies.txt on the VPS."
+        )
     return None
 
 
