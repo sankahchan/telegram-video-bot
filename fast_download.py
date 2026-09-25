@@ -62,14 +62,36 @@ async def fast_download(client, msg, dest_path, workers=8, progress=None):
 
     async def fetch(idx, cstart, cend, part_path):
         count = cend - cstart  # chunks
-        with open(part_path, "wb") as f:
-            # get_file(file_id, file_size, limit=chunks, offset=start_chunk)
-            async for data in client.get_file(file_id, file_size, limit=count, offset=cstart):
-                f.write(data)
-                async with lock:
-                    done[idx] += len(data)
-                    if progress:
-                        progress(min(sum(done), file_size), file_size)
+        # NOTE: Pyrogram's get_file() swallows errors internally —
+        # the generator just STOPS early instead of raising. So a worker
+        # can silently deliver a short part; we MUST verify the size
+        # and retry, otherwise the assembled file is truncated/corrupt.
+        expected = min(cend * CHUNK_SIZE, file_size) - cstart * CHUNK_SIZE
+        last_err = None
+        for attempt in range(3):
+            async with lock:
+                done[idx] = 0
+            try:
+                with open(part_path, "wb") as f:
+                    # get_file(file_id, file_size, limit=chunks, offset=start_chunk)
+                    async for data in client.get_file(file_id, file_size, limit=count, offset=cstart):
+                        f.write(data)
+                        async with lock:
+                            done[idx] += len(data)
+                            if progress:
+                                progress(min(sum(done), file_size), file_size)
+                actual = os.path.getsize(part_path)
+                if actual == expected:
+                    return
+                last_err = (
+                    f"part {idx} incomplete: {actual}/{expected} bytes"
+                )
+                print(f"⚠️ {last_err} — retrying ({attempt + 1}/3)")
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                print(f"⚠️ part {idx} failed ({last_err}) — retrying ({attempt + 1}/3)")
+            await asyncio.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"download failed: {last_err}")
 
     try:
         await asyncio.gather(

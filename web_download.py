@@ -72,7 +72,11 @@ def direct_file_kind(url: str) -> str:
 
 async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
                                progress_cb=None, loop=None, tag: str = "📥"):
-    """Plain HTTP download for direct file links (PDF etc.). Returns (path, filename)."""
+    """Plain HTTP download for direct file links (PDF etc.). Returns (path, filename).
+
+    Retries up to 3 times; verifies size against Content-Length when known —
+    a truncated file is never returned silently.
+    """
     import time
     import urllib.parse
     import urllib.request
@@ -112,9 +116,19 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
                             last[0], last[1] = now, pct
                             fut = progress_cb(tag, pct)
                             asyncio.run_coroutine_threadsafe(fut, loop)
+            if total and done != total:
+                raise RuntimeError(f"incomplete download ({done}/{total} bytes)")
             return path, name
 
-    return await asyncio.to_thread(_run)
+    last_err = None
+    for attempt in range(3):
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            print(f"⚠️ direct download failed ({last_err}) — retrying ({attempt + 1}/3)")
+            await asyncio.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"download မအောင်မြင်ပါ (3 ကြိမ် စမ်းပြီးပြီ): {last_err}")
 
 
 def _base_opts(outtmpl: str, fmt: str):
