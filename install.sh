@@ -57,10 +57,25 @@ python3 -m venv venv
 echo ""
 echo "🔑 Bot settings ဖြည့်ပါ"
 read -rp "API_ID (my.telegram.org): " API_ID
+# ဂဏန်းသက်သက် ဆွဲထုတ် (quote/smart-quote/space မှန်သမျှ ခံနိုင်ရည်ရှိ)
+API_ID=$(python3 -c "import re,sys; m=re.findall(r'\d+', sys.argv[1]); print(m[0] if m else '')" "$API_ID")
+if [ -z "$API_ID" ]; then
+  echo "❌ API_ID ဂဏန်းဖြစ်ရမယ် — my.telegram.org က App api_id ကို ပြန်ထည့်ပါ."
+  exit 1
+fi
 read -rp "API_HASH: " API_HASH
 read -rp "BOT_TOKEN (@BotFather): " BOT_TOKEN
-read -rp "ALLOWED_USER_IDS (သင့် Telegram ID — @userinfobot မှာ ကြည့်နိုင်, Enter=default): " ALLOWED_IDS
-ALLOWED_IDS="${ALLOWED_IDS:-}"
+# ALLOWED_USER_IDS: ဂဏန်း ID တွေပဲ လက်ခံ — username မှားထည့်မိရင် တန်းသတိပေး
+while true; do
+  read -rp "ALLOWED_USER_IDS (ဂဏန်း Telegram ID — @userinfobot မှာ ကြည့်နိုင်, Enter=default): " ALLOWED_IDS_RAW
+  ALLOWED_IDS=$(python3 -c "import re,sys; print(','.join(re.findall(r'\d+', sys.argv[1])))" "$ALLOWED_IDS_RAW")
+  if [ -n "$ALLOWED_IDS" ] || [ -z "$ALLOWED_IDS_RAW" ]; then
+    break
+  fi
+  echo "⚠️ '$ALLOWED_IDS_RAW' ထဲမှာ ဂဏန်း ID မတွေ့ပါ."
+  echo "   @userinfobot ကို Telegram မှာ စာပို့ပြီး ရတဲ့ ဂဏန်းသက်သက် ထည့်ပါ (ဥပမာ 1180438393)."
+  echo "   Username (@...) နဲ့ မရပါ."
+done
 
 # .env အရင်ရေး (generate_session.py က API_ID/API_HASH ကို .env ကနေ ဖတ်မယ်)
 # NOTE: quote မပါဘဲ ရေး — systemd EnvironmentFile က quote ကို မဖယ်ဘူး

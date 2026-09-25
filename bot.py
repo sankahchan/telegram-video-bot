@@ -46,7 +46,7 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip().strip("\"'“”‘’").strip()
 
 
-API_ID = int(_env("API_ID", "0") or 0)
+API_ID = int(re.sub(r"\D", "", _env("API_ID", "0")) or 0)
 API_HASH = _env("API_HASH")
 BOT_TOKEN = _env("BOT_TOKEN")
 SESSION_STRING = _env("SESSION_STRING")
