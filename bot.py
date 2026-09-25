@@ -1339,7 +1339,10 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
     if sent is not None and cache_key:
         try:
             media = {"audio": getattr(sent, "audio", None),
-                     "photo": (getattr(sent, "photo", None) or [None])[-1],
+                     # Pyrogram Message.photo is a single Photo object
+                     # (not a list) — subscripting it raised
+                     # "'Photo' object is not subscriptable".
+                     "photo": getattr(sent, "photo", None),
                      "video_note": getattr(sent, "video_note", None),
                      "video": getattr(sent, "video", None),
                      "document": getattr(sent, "document", None)}.get(sent_kind)

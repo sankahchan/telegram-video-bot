@@ -7,8 +7,11 @@ Private/login-walled content: put browser cookies in cookies.txt
 (next to this file) — export with a "Get cookies.txt" browser extension.
 """
 import asyncio
+import json
 import os
 import re
+import shutil
+import subprocess
 import time
 
 from x_media import XMediaError, extract_x_media, is_x_url
@@ -477,6 +480,95 @@ def _pick_x_video(items: list) -> dict:
     return videos[0]
 
 
+class _CorruptDownload(Exception):
+    """verify_web_video() failed — the file downloaded but is corrupt
+    (truncated video track / no video stream). Retryable."""
+
+
+def verify_web_video(path: str) -> tuple:
+    """ffprobe sanity check for a downloaded web video.
+
+    Catches the "silent corruption" class: yt-dlp exits 0 but the file's
+    video track is truncated (frozen frame + working audio) or missing.
+    Returns (ok, reason). Skips (ok=True) when ffprobe is unavailable —
+    never block a download on the checker itself.
+    """
+    if not shutil.which("ffprobe"):
+        return True, "no ffprobe — skipped"
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries",
+             "stream=codec_type,width,height,avg_frame_rate,duration,nb_frames",
+             "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=60)
+        info = json.loads(proc.stdout or "{}")
+        vids = [s for s in (info.get("streams") or [])
+                if s.get("codec_type") == "video"]
+        if not vids:
+            return False, "no video stream"
+        v = vids[0]
+        if int(v.get("width") or 0) <= 0 or int(v.get("height") or 0) <= 0:
+            return False, "video stream has no dimensions"
+        try:
+            vdur = float(v.get("duration") or 0)
+        except (TypeError, ValueError):
+            vdur = 0
+        try:
+            cdur = float((info.get("format") or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            cdur = 0
+        if cdur > 1 and vdur > 0 and vdur < cdur * 0.9:
+            return False, (f"video track truncated "
+                           f"({vdur:.1f}s of {cdur:.1f}s)")
+        if cdur > 1 and vdur <= 0:
+            try:
+                nfs = sum(int(s.get("nb_frames") or 0) for s in vids)
+            except (TypeError, ValueError):
+                nfs = 0
+            if nfs <= 1:
+                return False, "video has no decodable frames"
+        return True, "ok"
+    except Exception as e:
+        # checker itself failed — don't punish the download
+        return True, f"probe error ({e}) — skipped"
+
+
+def ensure_audio_track(path: str) -> str:
+    """Mux a silent AAC track when the video has no audio stream.
+
+    Telegram clients render soundless videos with a GIF badge; a silent
+    track keeps the normal video UI without changing what the user hears.
+    Stream-copies the video (no re-encode). Returns path (unchanged when
+    audio already exists or ffmpeg is unavailable).
+    """
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return path
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30)
+        if proc.stdout.strip():
+            return path  # already has audio
+        out = path + ".withaudio.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error",
+             "-i", path,
+             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+             "-shortest", "-c:v", "copy", "-c:a", "aac", out],
+            capture_output=True, timeout=300, check=True)
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            os.replace(out, path)
+            print("🔇 no audio track — silent AAC muxed (GIF-badge fix)")
+        return path
+    except Exception as e:
+        print(f"⚠️ silent-audio mux failed: {e}")
+        return path
+
+
 async def download_web(url: str, tmpdir: str, quality: str = "high",
                        audio_only: bool = False, progress_cb=None,
                        loop=None, tag: str = "📥"):
@@ -518,6 +610,11 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             path, _t = await download_direct_file(
                 item["url"], tmpdir, progress_cb=progress_cb,
                 loop=loop, tag=tag)
+            ok, reason = await asyncio.to_thread(verify_web_video, path)
+            if not ok:
+                raise XMediaError(
+                    "network", f"X cascade download corrupt: {reason}")
+            path = await asyncio.to_thread(ensure_audio_track, path)
             title = (item.get("title") or "x_video").strip() or "x_video"
             return path, title
         except XMediaError as e:
@@ -562,11 +659,40 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                       ["web_embedded"], ["mweb"]]
     result = None
     last_err: Exception | None = None
+    corrupt_n = 0
     for ci, clients in enumerate(client_variants):
         for i, fmt in enumerate(fmts):
             try:
                 result = await asyncio.to_thread(_run, fmt, clients)
+                # v5.4.5: verify the file — yt-dlp can exit 0 on a
+                # truncated/corrupt download (frozen frame / lost audio).
+                ok, reason = await asyncio.to_thread(
+                    verify_web_video, result[0])
+                if not ok:
+                    raise _CorruptDownload(reason)
+                if not audio_only:
+                    new_path = await asyncio.to_thread(
+                        ensure_audio_track, result[0])
+                    result = (new_path, result[1])
                 break
+            except _CorruptDownload as e:
+                last_err = e
+                corrupt_n += 1
+                try:
+                    if result and os.path.exists(result[0]):
+                        os.remove(result[0])
+                except OSError:
+                    pass
+                result = None
+                if corrupt_n >= 3:
+                    raise RuntimeError(
+                        f"download ဆက်တိုက်ပျက်နေပါတယ် ({e}) — "
+                        f"CDN/network flake ဖြစ်နိုင်ပါတယ်, ခဏနေပြန်စမ်းပါ\n"
+                        f"Download keeps coming back corrupt ({e}) — "
+                        f"possible CDN/network flake, try again later.")
+                print(f"⚠️ [{clients}] corrupt download ({e}) — "
+                      f"retry {corrupt_n}/3")
+                continue
             except Exception as e:
                 last_err = e
                 if not _retryable_yt_error(e):
