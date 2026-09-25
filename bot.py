@@ -31,6 +31,7 @@ Env vars:
 """
 import os
 import re
+import mimetypes
 import asyncio
 import tempfile
 import traceback
@@ -368,6 +369,33 @@ def media_size_mb(msg) -> float:
     m = media_of(msg)
     size = getattr(m, "file_size", 0) or 0
     return round(size / 1048576, 1)
+
+
+def _safe_filename(name: str) -> str:
+    name = (name or "").replace("/", "_").replace("\\", "_")
+    name = "".join(c for c in name if c.isprintable()).strip().strip(".")
+    return name[:120] or "file"
+
+
+def original_filename(msg, kind: str, tag) -> str:
+    """Download filename that keeps Telegram's original name/extension.
+
+    Without this the file lands as e.g. '1_' (no extension) and Telegram
+    shows it as generic 'data' that can't be opened (PDF case).
+    """
+    media = media_of(msg)
+    raw = (getattr(media, "file_name", None) or "").strip()
+    if raw:
+        return f"{tag}_{_safe_filename(raw)}"
+    mime = (getattr(media, "mime_type", None) or "").split(";")[0].strip()
+    if mime == "audio/ogg":
+        ext = ".ogg"  # voice messages; mimetypes would give .oga
+    else:
+        ext = mimetypes.guess_extension(mime) if mime else None
+    base = {"video": "video", "audio": "audio", "voice": "voice",
+            "photo": "photo", "video_note": "video_note",
+            "animation": "animation", "doc": "document"}.get(kind, "file")
+    return f"{tag}_{base}{ext or ''}"
 
 
 def build_caption(text: str) -> str:
@@ -939,7 +967,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     return
                 try:
                     path = await download_tg_media(
-                        msg, f"{tmpdir}/find_",
+                        msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), "find")),
                         make_tg_progress(status, "📥", loop))
                     final, as_audio = await post_process(path, media_kind(msg), uid, tmpdir, 0)
                     await status.edit_text("📤 ပို့နေပါတယ်...")
@@ -1046,7 +1074,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         queued += 1
                         continue
                     path = await download_tg_media(
-                        msg, f"{tmpdir}/{idx}_",
+                        msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), idx)),
                         make_tg_progress(status, tag, loop))
                     final, as_audio = await post_process(
                         path, media_kind(msg), uid, tmpdir, idx, quality=quality)
@@ -1165,7 +1193,8 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     for m in fresh:
                         try:
-                            path = await download_tg_media(m, f"{tmpdir}/w_", None)
+                            path = await download_tg_media(
+                                m, os.path.join(tmpdir, original_filename(m, media_kind(m), "w")), None)
                             final, as_audio = await post_process(
                                 path, media_kind(m), uid, tmpdir, m.id, use_trim=False)
                             await deliver(uid, uid, final,
@@ -1208,7 +1237,8 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                         msg, _, err = await fetch_message(ref["chat"], ref["msg"])
                         if not msg or not media_of(msg):
                             continue
-                        path = await download_tg_media(msg, f"{tmpdir}/n_", None)
+                        path = await download_tg_media(
+                            msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), "n")), None)
                         final, as_audio = await post_process(
                             path, media_kind(msg), uid, tmpdir, 0,
                             use_trim=False, quality=nq)
