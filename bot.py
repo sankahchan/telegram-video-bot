@@ -466,6 +466,21 @@ def friendly_web_error(e: Exception) -> str | None:
     return None
 
 
+def friendly_peer_error(err: str | None) -> str | None:
+    """'Peer id invalid' -> bilingual no-access guide (None = not a peer error)."""
+    if not err or "Peer id invalid" not in err:
+        return None
+    return (
+        "❌ ဒီ channel/group ကို access မရှိပါ.\n"
+        "• Login ဝင်ထားတဲ့ account က ဒီ channel/group ရဲ့ member ဖြစ်ရမယ်\n"
+        "• Private channel/group ဆို အရင် join (သို့) invite ယူထားရမယ်\n"
+        "• Member ဖြစ်ပြီးသားဆို VPS မှာ bot ကို restart လုပ်ပြီး ပြန်စမ်းပါ\n\n"
+        "No access to this channel/group. The logged-in Telegram account must "
+        "be a member of it — join the private channel/group first, then resend "
+        "the link."
+    )
+
+
 def build_caption(text: str) -> str:
     text = (text or "").strip()
     if len(text) > 1000:
@@ -1037,7 +1052,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 status = await emsg.reply_text("📥 ရှာနေပါတယ်...")
                 msg, _, err = await fetch_message(cid, mid)
                 if not msg or not media_of(msg):
-                    await status.edit_text(f"❌ မရပါ: {err or 'media မရှိ'}")
+                    await status.edit_text(
+                        f"❌ မရပါ: {friendly_peer_error(err) or (err or 'media မရှိ')}")
                     return
                 try:
                     path = await download_tg_media(
@@ -1146,35 +1162,57 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         msg, _, err = await fetch_message(cid, mid)
                     if not msg:
                         fail += 1
-                        await emsg.reply_text(f"❌ {tag} မရပါ.\n{err}")
+                        await emsg.reply_text(
+                            f"❌ {tag} မရပါ.\n{friendly_peer_error(err) or err}")
                         continue
                     if not media_of(msg):
                         fail += 1
                         await emsg.reply_text(f"❌ {tag}: media မရှိပါ.")
                         continue
-                    # night queue?
-                    if s["night"] and media_size_mb(msg) >= NIGHT_MIN_MB:
-                        night_q.add({"kind": "tg", "ref": {"chat": cid, "msg": mid},
-                                     "user_id": uid, "chat_id": chat_id,
-                                     "ts": datetime.datetime.now().isoformat(),
-                                     "label": f"t.me msg {mid}",
-                                     "quality": quality or s["quality"]})
-                        queued += 1
-                        continue
-                    path = await download_tg_media(
-                        msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), idx)),
-                        make_tg_progress(status, tag, loop))
-                    final, as_audio = await post_process(
-                        path, media_kind(msg), uid, tmpdir, idx, quality=quality)
-                    if s["zip"]:
-                        collected.append((final, build_caption(msg.caption),
-                                          media_kind(msg), as_audio))
-                    else:
-                        await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
-                        await deliver(uid, chat_id, final, msg.caption,
-                                      media_kind(msg), as_audio, media_kind(msg) == "video")
-                    ok += 1
-                    print(f"✅ tg ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
+                    # album (video+photo တွဲ) ဆို ပါဝင်တဲ့ media အားလုံး ဒေါင်း
+                    work = [msg]
+                    if getattr(msg, "media_group_id", None):
+                        try:
+                            grp = [m for m in await user.get_media_group(cid, mid)
+                                   if media_of(m)]
+                            if grp:
+                                work = grp
+                                print(f"🖼️ media group: {len(work)} ခု")
+                        except Exception as e:
+                            print(f"⚠️ media group မရ — single ပဲ ဆက်: {e}")
+                    for gi, wmsg in enumerate(work):
+                        wk = media_kind(wmsg)
+                        wtag = f"{idx}_{gi}" if len(work) > 1 else idx
+                        try:
+                            # night queue?
+                            if s["night"] and media_size_mb(wmsg) >= NIGHT_MIN_MB:
+                                night_q.add({"kind": "tg", "ref": {"chat": cid, "msg": wmsg.id},
+                                             "user_id": uid, "chat_id": chat_id,
+                                             "ts": datetime.datetime.now().isoformat(),
+                                             "label": f"t.me msg {wmsg.id}",
+                                             "quality": quality or s["quality"]})
+                                queued += 1
+                                continue
+                            path = await download_tg_media(
+                                wmsg, os.path.join(tmpdir, original_filename(wmsg, wk, wtag)),
+                                make_tg_progress(status, tag, loop))
+                            final, as_audio = await post_process(
+                                path, wk, uid, tmpdir, wtag, quality=quality)
+                            if s["zip"]:
+                                collected.append((final, build_caption(wmsg.caption),
+                                                  wk, as_audio))
+                            else:
+                                await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
+                                await deliver(uid, chat_id, final, wmsg.caption,
+                                              wk, as_audio, wk == "video")
+                            ok += 1
+                            print(f"✅ tg ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
+                        except Exception as e:
+                            traceback.print_exc()
+                            fail += 1
+                            item = f" (album {gi+1}/{len(work)})" if len(work) > 1 else ""
+                            await emsg.reply_text(
+                                f"❌ {tag}{item} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
                 else:
                     url = ref
                     await status.edit_text(f"{tag} 🌐 ဒေါင်းနေပါတယ်...")
