@@ -1,0 +1,26 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python syntax check
+        run: python3 -m py_compile bot.py generate_session.py
+
+      - name: Shell syntax check
+        run: |
+          bash -n start.sh
+          bash -n install.sh
+          bash -n update.sh
+
+      - name: Verify no secret files committed
+        run: |
+          if git ls-files | grep -xE "(\.env|session_string\.txt)"; then
+            echo "❌ secret file committed!"
+            exit 1
+          fi
+          echo "✅ no secret files"
