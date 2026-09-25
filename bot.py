@@ -27,6 +27,8 @@ from dotenv import load_dotenv
 
 load_dotenv()  # .env file ရှိရင် အဲဒီကနေ settings ဖတ်မယ်
 
+from fast_download import fast_download  # noqa: E402
+
 from pyrogram import Client as PyroClient
 from telegram import Update
 from telegram.ext import (
@@ -63,6 +65,10 @@ if not ALLOWED_IDS:
 
 MAX_BATCH = 10
 
+# Parallel download connections (1MB chunk တစ်ခုကို connection တစ်ခုစီ)
+# မြင့်လေ မြန်လေ — ဒါပေမယ့် 16 ထက် မကျော်သင့်ဘူး
+DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", "8") or 8)
+
 # user_id -> "video" | "file"  (ပို့မယ့်ပုံစံ)
 user_modes = {}
 
@@ -76,11 +82,13 @@ def mode_label(mode: str) -> str:
 
 
 # User account — restricted media download အတွက်
+# max_concurrent_transmissions: parallel chunk download အတွက် လိုအပ်တယ်
 user = PyroClient(
     "userbot",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
+    max_concurrent_transmissions=DOWNLOAD_WORKERS,
 )
 
 # Bot (MTProto) — media ပြန်ပို့ဖို့ (file ကြီးတွေ ရတယ်)
@@ -281,9 +289,22 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             try:
-                path = await user.download_media(
-                    msg, file_name=f"{tmpdir}/{i}_", progress=make_progress(tag)
-                )
+                dest = f"{tmpdir}/{i}_"
+                try:
+                    # Parallel multi-connection download (မြန်တယ်)
+                    path = await fast_download(
+                        user, msg, dest,
+                        workers=DOWNLOAD_WORKERS,
+                        progress=make_progress(tag),
+                    )
+                except Exception as e:
+                    # Parallel မရရင် ပုံမှန် download နဲ့ ပြန်စမ်း
+                    print(f"⚠️ fast download failed ({type(e).__name__}), fallback: {e}")
+                    path = await user.download_media(
+                        msg, file_name=dest, progress=make_progress(tag)
+                    )
+                    if not path:
+                        raise RuntimeError("download failed")
                 await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
                 await send_media(chat_id, path, msg, mode)
                 ok += 1

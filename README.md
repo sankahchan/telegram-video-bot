@@ -10,6 +10,7 @@ Download restricted Telegram videos/photos/files through **your own account sess
 
 ## ✨ Features
 
+- ⚡ **Parallel download** — multi-connection chunk download (much faster on high-latency links)
 - 📥 **Batch download** — up to 10 links at once / တစ်ခါတည်း 10 ခုအထိ
 - 📝 Original caption preserved / မူရင်း caption အတိုင်း
 - 🖼️ video / photo / video_note / document / animation / audio / voice
@@ -65,6 +66,14 @@ Get `BOT_TOKEN`: [@BotFather](https://t.me/BotFather) → /newbot
 | `BOT_TOKEN` | From @BotFather |
 | `SESSION_STRING` | Your user session (via `generate_session.py`) |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs allowed to use the bot |
+| `DOWNLOAD_WORKERS` | Parallel download connections (default 8) |
+
+## 🚀 Speed tips
+
+- **Parallel download** is built in (8 connections by default, adjustable via `DOWNLOAD_WORKERS`).
+  It helps most when the network latency to Telegram's servers is high.
+- **VPS location matters most**: Telegram's data centers are in Europe —
+  a VPS in the EU (e.g. Hetzner Germany) downloads noticeably faster than one in Asia.
 
 ## 🔐 Security
 
