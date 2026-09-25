@@ -193,6 +193,32 @@ async def probe_size(url: str):
         return None
 
 
+async def _diagnose_formats(url: str) -> str:
+    """Probe video info (no download) to explain an empty format list."""
+    def _run():
+        from yt_dlp import YoutubeDL
+        opts = _base_opts("/tmp/yt_diag", "b")
+        opts.update({"skip_download": True})
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+        except Exception as e:
+            return f"info probe failed: {type(e).__name__}"
+        n = len(info.get("formats") or [])
+        bits = [f"formats={n}"]
+        if info.get("age_limit"):
+            bits.append(f"age_limit={info['age_limit']}")
+        if info.get("availability"):
+            bits.append(f"availability={info['availability']}")
+        if info.get("live_status"):
+            bits.append(f"live={info['live_status']}")
+        return "YouTube returned " + ", ".join(bits)
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        return f"diagnosis failed: {e}"
+
+
 async def download_web(url: str, tmpdir: str, quality: str = "high",
                        audio_only: bool = False, progress_cb=None,
                        loop=None, tag: str = "📥"):
@@ -244,12 +270,14 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             break
         except Exception as e:
             last_err = e
-            if "Requested format is not available" in str(e) and i < len(fmts) - 1:
+            if "Requested format is not available" not in str(e):
+                raise
+            if i < len(fmts) - 1:
                 print(f"⚠️ format '{fmt}' မရပါ — fallback '{fmts[i+1]}' နဲ့ ပြန်စမ်းမယ်")
                 continue
-            raise
-    else:
-        raise last_err
+            # last fallback also blocked — diagnose the real cause
+            diag = await _diagnose_formats(url)
+            raise RuntimeError(f"Requested format is not available || {diag}") from e
     if not path or not os.path.exists(path):
         raise RuntimeError("download ပြီးပေမယ့် file မတွေ့ပါ")
     return path, title

@@ -416,12 +416,17 @@ def friendly_web_error(e: Exception) -> str | None:
             "then resend the link."
         )
     if "Requested format is not available" in s:
+        extra = ""
+        if "||" in s:
+            extra = "\n\n🔍 စစ်ဆေးချက်: " + s.split("||", 1)[1].strip()
         return (
             "❌ YouTube က ဒီ video အတွက် download format မပေးပါ.\n"
             "ဖြစ်နိုင်ချေများ:\n"
             "• yt-dlp version အဟောင်း — VPS မှာ update.sh ပြန် run ပေးပါ\n"
             "  (bash /opt/tg-video-bot/update.sh)\n"
-            "• video က age-restricted / region-blocked / members-only\n\n"
+            "• video က age-restricted / region-blocked / members-only"
+            + extra +
+            "\n\n"
             "YouTube isn't offering a downloadable format for this video. "
             "Try updating yt-dlp via update.sh on the VPS; the video itself "
             "may also be age-restricted, region-blocked, or members-only."
