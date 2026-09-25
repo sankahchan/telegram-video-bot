@@ -16,6 +16,7 @@ echo "📥 GitHub ကနေ အသစ်ဆွဲနေပါတယ်..."
 git pull --ff-only
 echo "🔍 Code စစ်နေပါတယ်..."
 ./venv/bin/python -m py_compile bot.py store.py web_download.py media_tools.py fast_download.py generate_session.py \
+  x_media.py tiktok_media.py torrent_download.py filecache.py \
   || { echo "❌ Code error တွေ့လို့ restart မလုပ်ပါ — အဟောင်း ဆက်� run နေမယ်."; exit 1; }
 echo "📚 Dependencies update..."
 ./venv/bin/pip install -q -r requirements.txt
@@ -25,6 +26,11 @@ echo "🎬 ffmpeg စစ်နေပါတယ်..."
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "📥 ffmpeg မဆိသေးလို့ install လုပ်နေပါတယ်..."
   apt-get update -qq && apt-get install -y -qq ffmpeg
+fi
+echo "🧲 aria2c (torrent) စစ်နေပါတယ်..."
+if ! command -v aria2c >/dev/null 2>&1; then
+  echo "📥 aria2c မရှိသေးလို့ install လုပ်နေပါတယ်..."
+  apt-get update -qq && apt-get install -y -qq aria2
 fi
 echo "🔄 Restart..."
 systemctl restart "$SERVICE_NAME"

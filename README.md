@@ -36,6 +36,9 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 🍪 **Per-site cookies** — `cookies_youtube.txt` / `cookies_instagram.txt` / `cookies_twitter.txt` / `cookies_tiktok.txt` (fallback: shared `cookies.txt`); **proxy** support via `YTDLP_PROXY` (e.g. `socks5://user:pass@host:port`)
 - 🛡️ **Download integrity check** — every web video is ffprobe-verified after download (truncated/corrupt files are auto-retried, never silently sent); soundless videos get a silent audio track so Telegram shows them as video instead of GIF
 - 🎞️ **H.264 normalization** — Instagram/YouTube serve VP9/AV1 which iOS Telegram can't decode (frozen frame + audio). Web videos are normalized to H.264 + AAC + faststart before sending; H.264 sources are stream-copied (no re-encode)
+- 🧲 **Torrents** — send a magnet link or upload a `.torrent` file; the bot fetches metadata, picks the largest video file, and downloads it via aria2c (seeding disabled, ~2GB Telegram cap)
+
+> ⚠️ **Torrent note:** some VPS providers prohibit torrent traffic (copyright complaints can get the VPS suspended) and torrenting shares bandwidth with other services on the box. Seeding is disabled by the bot (`--seed-time=0`), but prefer legal torrents.
 
 > 📌 Instagram/Facebook **private** content (stories etc.) needs login cookies:
 > export `cookies.txt` (browser extension "Get cookies.txt") and place it next to `bot.py`.

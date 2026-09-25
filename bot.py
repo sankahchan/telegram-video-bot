@@ -31,6 +31,7 @@ Env vars:
 """
 import os
 import re
+import hashlib
 import mimetypes
 import asyncio
 import tempfile
@@ -55,6 +56,11 @@ from web_download import (  # noqa: E402
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
 from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
+from torrent_download import (  # noqa: E402
+    is_magnet, extract_magnets, have_aria2, fetch_magnet_metadata,
+    torrent_files, pick_target, download_torrent, check_torrent_size,
+    TorrentError, MAX_TORRENT_FILE_MB,
+)
 
 from pyrogram import Client as PyroClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -201,7 +207,8 @@ HELP_OVERVIEW = (
     "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
     "/xtimeline — X profile ရဲ့ latest video တွေ\n"
     "/clearcache — file_id cache ရှင်း (owner only)\n"
-    "/ytcheck [url] — YouTube pipeline စစ် (owner only)"
+    "/ytcheck [url] — YouTube pipeline စစ် (owner only)\n"
+    "🧲 **Torrent** — magnet link ပို့ (သို့) .torrent file တင်"
 )
 
 HELP_TOPICS = {
@@ -1455,6 +1462,97 @@ def make_tg_progress(status, tag, loop):
     return cb
 
 
+_TORRENT_VIDEO_EXTS = {
+    ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts",
+    ".m4v", ".3gp", ".mpg", ".mpeg",
+}
+_TORRENT_AUDIO_EXTS = {
+    ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac",
+}
+
+
+async def run_torrent(emsg, uid: int, chat_id: int, source: str,
+                      is_magnet_src: bool, cache_key: str | None = None):
+    """Magnet / .torrent download flow: metadata -> pick file -> download
+    -> post-process -> deliver. source = magnet link or .torrent file path."""
+    if not have_aria2():
+        await emsg.reply_text(
+            "❌ torrent engine (aria2c) မရှိသေးပါ — VPS မှာ run ပေးပါ:\n"
+            "bash /opt/tg-video-bot/update.sh")
+        return
+    s = st(uid)
+    if cache_key is None and is_magnet_src and _cache_eligible(uid):
+        cache_key = make_key("torrent", source, s["mode"], s["quality"])
+    if cache_key:
+        hit = fcache.get(cache_key)
+        if hit:
+            await emsg.reply_text("🧲 ⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
+            await deliver_cached(uid, chat_id, hit, source)
+            print(f"⚡ torrent cache hit -> {uid}")
+            return
+    status = await emsg.reply_text("🧲 torrent ပြင်ဆင်နေပါတယ်...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        loop = asyncio.get_running_loop()
+        try:
+            if is_magnet_src:
+                await status.edit_text(
+                    "🧲 magnet metadata ရယူနေပါတယ် (DHT, ခဏကြာနိုင်)...")
+                tpath = await asyncio.to_thread(
+                    fetch_magnet_metadata, source, tmpdir)
+                aria_src = tpath
+            else:
+                tpath = source
+                aria_src = tpath
+            files = await asyncio.to_thread(torrent_files, tpath)
+            target = pick_target(files)
+            check_torrent_size(target["size"])
+            tname = os.path.basename(target["path"])
+            size_mb = target["size"] / 1048576
+            if len(files) > 1:
+                await status.edit_text(
+                    f"🧲 `{tname}`\n"
+                    f"📦 {len(files)} files ထဲက အကြီးဆုံး video ကို ရွေးထားပါတယ် "
+                    f"({size_mb:.0f}MB)")
+            else:
+                await status.edit_text(
+                    f"🧲 `{tname}` ({size_mb:.0f}MB)")
+
+            last_edit = [0.0, -1]
+
+            def _prog(done: int, total: int):
+                pct = int(done / total * 100) if total else 0
+                now = time.time()
+                if pct != last_edit[1] and now - last_edit[0] >= 10:
+                    last_edit[0], last_edit[1] = now, pct
+                    fut = status.edit_text(
+                        f"🧲 `{tname}`\n"
+                        f"⬇️ {done/1048576:.0f}/{size_mb:.0f}MB ({pct}%)")
+                    asyncio.run_coroutine_threadsafe(fut, loop)
+
+            await status.edit_text(
+                f"🧲 `{tname}`\n⬇️ ဒေါင်းနေပါတယ် (0/{size_mb:.0f}MB)...")
+            path = await asyncio.to_thread(
+                download_torrent, aria_src, tmpdir, target["index"],
+                target["size"], _prog)
+            ext = os.path.splitext(path)[1].lower()
+            kind = ("video" if ext in _TORRENT_VIDEO_EXTS
+                    else "audio" if ext in _TORRENT_AUDIO_EXTS else "doc")
+            await status.edit_text("📤 ပို့နေပါတယ်...")
+            final, as_audio = await post_process(
+                path, kind, uid, tmpdir, 0, use_trim=False)
+            caption = f"🧲 {tname}"
+            await deliver(uid, chat_id, final, caption, kind, as_audio,
+                          kind == "video", log_kind="torrent",
+                          cache_key=cache_key)
+            await status.delete()
+        except TorrentError as e:
+            traceback.print_exc()
+            await status.edit_text(str(e))
+        except Exception as e:
+            traceback.print_exc()
+            await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
+
+
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                       text: str = None, quality: str = None, prompt: bool = True):
     """Link handler.
@@ -1504,6 +1602,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
         else:
             await emsg.reply_text("❌ နံပါတ် မှားနေပါတယ်.")
+        return
+
+    # Torrent: magnet links
+    magnets = extract_magnets(text)
+    if magnets:
+        if len(magnets) > 1:
+            await emsg.reply_text(
+                f"🧲 magnet {len(magnets)} ခု တွေ့ပါတယ် — ပထမတစ်ခုပဲ "
+                "ဒေါင်းပေးမယ် (torrent က ကြာတတ်လို့).")
+        await run_torrent(emsg, uid, chat_id, magnets[0], True)
         return
 
     # Telegram links
@@ -1766,6 +1874,44 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 # ---------------------------------------------------------------- background jobs
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """.torrent file uploads -> torrent download flow."""
+    emsg = update.effective_message
+    if emsg is None or not allowed(update):
+        return
+    doc = emsg.document
+    if doc is None:
+        return
+    fname = (doc.file_name or "").lower()
+    mime = (doc.mime_type or "").lower()
+    if not (fname.endswith(".torrent") or "x-bittorrent" in mime):
+        return  # not a torrent — ignore (other documents aren't handled)
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    status = await emsg.reply_text("🧲 .torrent file ရယူနေပါတယ်...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            tpath = os.path.join(tmpdir, "upload.torrent")
+            msg, _, err = await fetch_message(chat_id, emsg.message_id)
+            if not msg or not msg.document:
+                await status.edit_text(
+                    f"❌ file ရယူမရပါ: {friendly_peer_error(err) or (err or '?')}")
+                return
+            await download_tg_media(msg, tpath, None)
+            await status.delete()
+            ckey = None
+            if _cache_eligible(uid):
+                s = st(uid)
+                with open(tpath, "rb") as f:
+                    ckey = make_key("torrent", hashlib.sha1(f.read()).hexdigest(),
+                                    s["mode"], s["quality"])
+            await run_torrent(emsg, uid, chat_id, tpath, False,
+                              cache_key=ckey)
+        except Exception as e:
+            traceback.print_exc()
+            await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
+
+
 async def watch_job(context: ContextTypes.DEFAULT_TYPE):
     """5 မိနစ်တစ်ခါ: watch လုပ်ထားတဲ့ channel တွေမှာ post အသစ် စစ်မယ်."""
     for uid, chats in watches.all().items():
@@ -1926,6 +2072,13 @@ def main():
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
             handle_link,
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            tg_filters.ChatType.PRIVATE & tg_filters.Document.ALL
+            & ~tg_filters.COMMAND,
+            handle_document,
         )
     )
     jq = app.job_queue
