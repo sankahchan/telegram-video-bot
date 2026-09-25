@@ -535,37 +535,64 @@ def verify_web_video(path: str) -> tuple:
         return True, f"probe error ({e}) — skipped"
 
 
-def ensure_audio_track(path: str) -> str:
-    """Mux a silent AAC track when the video has no audio stream.
+def normalize_web_video(path: str) -> str:
+    """Normalize a downloaded web video to H.264 + AAC (faststart).
 
-    Telegram clients render soundless videos with a GIF badge; a silent
-    track keeps the normal video UI without changing what the user hears.
-    Stream-copies the video (no re-encode). Returns path (unchanged when
-    audio already exists or ffmpeg is unavailable).
+    Instagram/YouTube serve VP9/AV1, which iOS Telegram cannot decode —
+    the video freezes on the first frame while the audio keeps playing.
+    H.264 + AAC plays everywhere. Sources already H.264 are stream-copied
+    (fast); only other codecs pay for a transcode. Soundless videos get a
+    silent AAC track (Telegram renders soundless videos with a GIF badge).
+    Returns path (replaced in place when changed; original kept on any
+    failure).
     """
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         return path
     try:
         proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=codec_type",
-             "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=30)
-        if proc.stdout.strip():
-            return path  # already has audio
-        out = path + ".withaudio.mp4"
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=codec_type,codec_name",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=60)
+        info = json.loads(proc.stdout or "{}")
+        vcodec = acodec = None
+        for s in info.get("streams") or []:
+            if s.get("codec_type") == "video" and vcodec is None:
+                vcodec = (s.get("codec_name") or "").lower()
+            elif s.get("codec_type") == "audio" and acodec is None:
+                acodec = (s.get("codec_name") or "").lower()
+        if not vcodec:
+            return path
+        has_audio = acodec is not None
+        if vcodec == "h264" and (acodec == "aac" or not has_audio):
+            if has_audio:
+                return path  # already universal
+            inputs = ["-i", path, "-f", "lavfi",
+                      "-i", "anullsrc=r=44100:cl=stereo"]
+            args = ["-shortest", "-c:v", "copy", "-c:a", "aac"]
+            note = "silent AAC muxed (GIF-badge fix)"
+        else:
+            inputs = ["-i", path]
+            args = ["-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p"]
+            if has_audio:
+                args += ["-c:a", "aac"]
+            else:
+                inputs += ["-f", "lavfi",
+                           "-i", "anullsrc=r=44100:cl=stereo"]
+                args += ["-shortest", "-c:a", "aac"]
+            note = f"{vcodec} -> H.264 (iOS playback fix)"
+        out = path + ".norm.mp4"
         subprocess.run(
-            ["ffmpeg", "-y", "-v", "error",
-             "-i", path,
-             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-             "-shortest", "-c:v", "copy", "-c:a", "aac", out],
-            capture_output=True, timeout=300, check=True)
+            ["ffmpeg", "-y", "-v", "error", *inputs, *args,
+             "-movflags", "+faststart", out],
+            capture_output=True, timeout=1800, check=True)
         if os.path.exists(out) and os.path.getsize(out) > 0:
             os.replace(out, path)
-            print("🔇 no audio track — silent AAC muxed (GIF-badge fix)")
+            print(f"🎞️ {note}")
         return path
     except Exception as e:
-        print(f"⚠️ silent-audio mux failed: {e}")
+        print(f"⚠️ video normalize failed: {e}")
         return path
 
 
@@ -614,7 +641,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             if not ok:
                 raise XMediaError(
                     "network", f"X cascade download corrupt: {reason}")
-            path = await asyncio.to_thread(ensure_audio_track, path)
+            path = await asyncio.to_thread(normalize_web_video, path)
             title = (item.get("title") or "x_video").strip() or "x_video"
             return path, title
         except XMediaError as e:
@@ -672,7 +699,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                     raise _CorruptDownload(reason)
                 if not audio_only:
                     new_path = await asyncio.to_thread(
-                        ensure_audio_track, result[0])
+                        normalize_web_video, result[0])
                     result = (new_path, result[1])
                 break
             except _CorruptDownload as e:
