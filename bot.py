@@ -190,7 +190,8 @@ HELP_OVERVIEW = (
     "/watch — post အသစ် auto-download\n"
     "/unwatch /watchlist\n"
     "/stats — download stats\n"
-    "/adduser /deluser /users — owner only"
+    "/adduser /deluser /users — owner only\n"
+    "/join — VPS account ကို channel join ခိုင်း (owner only)"
 )
 
 HELP_TOPICS = {
@@ -324,6 +325,16 @@ HELP_TOPICS = {
         "👥 /users — သုံးခွင့်ရှိသူများ ကြည့် (owner only)\n\n"
         "အသုံးပြုပုံ / Usage:\n"
         "  /users"
+    ),
+    "join": (
+        "🔗 /join — VPS account ကို channel/group join ခိုင်း (owner only)\n\n"
+        "Bot က သူ့ရဲ့ VPS Telegram account နဲ့ ဒေါင်းတာမို့ private\n"
+        "channel/group ဆို အဲဒီ account ကိုယ်တိုင် member ဖြစ်ရမယ်.\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /join <invite link>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /join https://t.me/+AbCdEfGhIjKlMnOp\n\n"
+        "→ join ပြီးရင် link ပြန်ပို့ပြီး ဒေါင်းလို့ရပြီ"
     ),
 }
 
@@ -685,6 +696,48 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ids = sorted(ALLOWED_IDS | user_store.allowed_ids())
     lines = [f"• `{i}`" + (" (owner)" if i == OWNER_ID else "") for i in ids]
     await update.message.reply_text("👥 **သုံးခွင့်ရှိသူများ:**\n" + "\n".join(lines))
+
+
+async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: VPS Telegram account ကို channel/group join ခိုင်းမယ်.
+
+    အသုံးပြုပုံ: /join <invite link>
+    ဥပမာ: /join https://t.me/+AbCdEfGhIjKlMnOp
+    """
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /join <invite link>\n"
+            "ဥပမာ: /join https://t.me/+AbCdEfGhIjKlMnOp\n\n"
+            "Bot ရဲ့ VPS account က အဲဒီ channel/group ကို join လုပ်ပါမယ် — "
+            "ပြီးမှ link တွေ ဒေါင်းလို့ရမယ်."
+        )
+        return
+    link = context.args[0].strip()
+    wait = await update.message.reply_text("⏳ Join လုပ်နေပါတယ်...")
+    try:
+        chat = await user.join_chat(link)
+        title = getattr(chat, "title", None) or getattr(chat, "id", link)
+        try:
+            await user.get_chat(chat.id)
+            ok = True
+        except Exception:
+            ok = False
+        await wait.edit_text(
+            f"✅ Join ပြီးပါပြီ: **{title}**\n"
+            + ("📥 အခု link တွေ ဒေါင်းလို့ရပါပြီ — ပြန်ပို့ပေးပါ." if ok
+               else "⚠️ join ခဲ့ပေမယ့် ဖတ်လို့ မရသေးပါ — invite link စစ်ပါ.")
+        )
+    except Exception as e:
+        msg = str(e)
+        hint = ""
+        if "USER_ALREADY_PARTICIPANT" in msg:
+            hint = "\nℹ️ အဲဒီ account က member ဖြစ်ပြီးသားပါ — link ပြန်ပို့စမ်းကြည့်ပါ."
+        elif "INVITE_HASH_EXPIRED" in msg or "INVITE_HASH_INVALID" in msg:
+            hint = "\n💡 invite link သက်တမ်း ကုန်နေတာ (သို့) မှားနေတာ ဖြစ်နိုင်ပါတယ်."
+        await wait.edit_text(f"❌ Join မရပါ: {msg}{hint}")
 
 
 async def trim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1491,7 +1544,7 @@ def main():
         ("mp3", mp3_cmd), ("zip", zip_cmd), ("save", save_cmd),
         ("nightmode", nightmode_cmd), ("stats", stats_cmd),
         ("adduser", adduser_cmd), ("deluser", deluser_cmd), ("users", users_cmd),
-        ("trim", trim_cmd), ("find", find_cmd),
+        ("trim", trim_cmd), ("find", find_cmd), ("join", join_cmd),
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
