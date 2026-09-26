@@ -148,7 +148,7 @@ echo "🧩 Cobalt self-hosted (optional — YouTube bot-wall fallback အတွ�
 echo "   run ထားရင် API URL ထည့်ပါ, မရှိရင် Enter နှိပ် (နောက်မှ ပြင်လို့ရ)"
 echo "   run ရန် (Docker):"
 echo "     docker run --name cobalt -d --restart unless-stopped -p 127.0.0.1:9000:9000 \\"
-echo "       ghcr.io/imputnet/cobalt"
+echo "       -e API_URL=http://127.0.0.1:9000 ghcr.io/imputnet/cobalt"
 read -rp "  COBALT_API_URL [Enter=skip]: " COBALT_URL
 if [ -n "$COBALT_URL" ]; then
   ./venv/bin/python -c "
