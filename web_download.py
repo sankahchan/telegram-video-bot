@@ -216,7 +216,12 @@ def direct_file_kind(url: str) -> str:
     return "doc"
 
 
-async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
+# Telegram (MTProto) can send up to 2GB; torrents already allow ~1.9GB total.
+# Direct HTTP downloads (X/Twitter, TikTok, direct links) use the same cap.
+DIRECT_MAX_MB = 1900
+
+
+async def download_direct_file(url: str, tmpdir: str, max_mb: int = DIRECT_MAX_MB,
                                progress_cb=None, loop=None, tag: str = "📥"):
     """Plain HTTP download for direct file links (PDF etc.). Returns (path, filename).
 
@@ -287,10 +292,10 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = 500,
         try:
             return await asyncio.to_thread(_run)
         except Exception as e:
-            if "webpage (HTML)" in str(e):
-                raise  # retrying won't turn a login wall into a video file
-            last_err = f"{type(e).__name__}: {e}"
-            print(f"⚠️ direct download failed ({last_err}) — retrying ({attempt + 1}/3)")
+            if "webpage (HTML)" in str(e) or "ကြီးလွန်းပါတယ်" in str(e):
+                raise  # deterministic — retrying changes nothing
+            last_err = str(e)
+            print(f"⚠️ direct download failed ({type(e).__name__}: {last_err}) — retrying ({attempt + 1}/3)")
             await asyncio.sleep(2 * (attempt + 1))
     raise RuntimeError(f"download မအောင်မြင်ပါ (3 ကြိမ် စမ်းပြီးပြီ): {last_err}")
 
