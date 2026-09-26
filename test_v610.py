@@ -355,13 +355,19 @@ u = asyncio.run(_sc(["bogus"]))
 check("setconvert rejects invalid", fake_settings.d["convert"] == before)
 check("setconvert usage hint", any("ask" in str(a) for a, k in u.message.edits))
 
-# --- 9. /search format tags (name-only, never guesses) --------------------
+# --- 9. /search format tags -----------------------------------------------
 check("mkv name tagged",
       bot._search_format_tag("Movie.2020.1080p.BluRay.x264.mkv-GROUP") == "📦")
 check("mp4 name tagged",
       bot._search_format_tag("Movie.2020.720p.WEB-DL.mp4-GROUP") == "🎬")
-check("no container -> no tag",
-      bot._search_format_tag("The Legend of Hei 2019 1080p BluRay-iVy") == "")
+check("bluray -> likely mkv",
+      bot._search_format_tag("The Legend of Hei 2019 1080p BluRay DDP 5.1") == "📦~")
+check("xvid -> likely needs convert",
+      bot._search_format_tag("Movie.2021.BRRip.XviD.AC3-EX") == "📦~")
+check("yts -> likely mp4",
+      bot._search_format_tag("Movie.2020.1080p.BluRay.YTS") == "🎬~")
+check("web-dl stays unknown",
+      bot._search_format_tag("Show.S01.1080p.AMZN.WEB-DL.DDP5.1") == "")
 check("release group not a container",
       bot._search_format_tag("Show.S01.MkvKing.1080p") == "")
 

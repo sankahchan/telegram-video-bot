@@ -1974,21 +1974,30 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             label, callback_data=f"dl:{r['info_hash']}")])
     await status.edit_text(
         "🔍 တွေ့တဲ့ torrent — ဒေါင်းချင်တာ ရွေးပါ (seeders များတာကို အရင်ပြ):\n"
-        "🎬=MP4 (iPhone အဆင်ပြေ)  📦=MKV (convert မေးမယ်)",
+        "🎬=တိုက်ရိုက်ကြည့် 📦=convert မေးမယ် (~=ခန့်မှန်း)",
         reply_markup=InlineKeyboardMarkup(kb))
 
 
 def _search_format_tag(name: str) -> str:
-    """Container tag from the result name only — never guesses.
+    """Container likelihood tag from the result name.
 
-    Returns '📦' for explicit MKV, '🎬' for explicit MP4, '' when the name
-    doesn't name a container (the real format is confirmed after metadata).
+    '🎬' / '📦' = the name states the container (certain).
+    '🎬~' / '📦~' = strong scene-naming convention (likely).
+    '' = unknown — the download-time convert prompt uses the real container,
+    so a wrong guess here never causes a wrong download.
+    '~' = ခန့်မှန်းချက်.
     """
     n = (name or "").lower()
     if re.search(r"\bmkv\b", n):
         return "📦"
-    if re.search(r"\bmp4\b", n):
+    if re.search(r"\b(mp4|m4v)\b", n):
         return "🎬"
+    if re.search(r"\b(xvid|divx|avi)\b", n):
+        return "📦~"  # AVI also triggers the convert prompt
+    if re.search(r"\byts?\b|yify", n):
+        return "🎬~"  # YTS/YIFY releases are MP4
+    if "bluray" in n or "blu-ray" in n:
+        return "📦~"  # scene BluRay releases are MKV (overwhelmingly)
     return ""
 
 
