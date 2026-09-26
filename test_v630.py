@@ -190,4 +190,14 @@ check("botwall error no longer in instant-raise path",
 check("fallback block reachable after botwall",
       src.index("botwalled = True") < src.index("youtube_fallback_url, url"))
 
+
+# --- 9. v6.3.2: unbuffered logs so fallback diagnostics reach the journal ----
+inst = open(os.path.join(REPO, "install.sh")).read()
+check("install.sh runs python -u", "venv/bin/python -u " in inst)
+upd = open(os.path.join(REPO, "update.sh")).read()
+check("update.sh patches existing service to python -u",
+      "python -u" in upd and "daemon-reload" in upd)
+check("fallback prints flush immediately",
+      src.count("flush=True") >= 3)
+
 print(f"\nPASS: {len(PASS)} checks")

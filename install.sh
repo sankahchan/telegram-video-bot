@@ -155,7 +155,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/bot.py
+ExecStart=$INSTALL_DIR/venv/bin/python -u $INSTALL_DIR/bot.py
 Restart=always
 RestartSec=5
 

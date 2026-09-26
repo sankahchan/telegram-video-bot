@@ -33,6 +33,15 @@ if ! command -v aria2c >/dev/null 2>&1; then
   apt-get update -qq && apt-get install -y -qq aria2
 fi
 echo "🔄 Restart..."
+# v6.3.2: run python unbuffered (-u) so print() reaches the journal
+# immediately — without it, stdout stays block-buffered and debug lines
+# (e.g. the YouTube fallback chain) never appear in journalctl.
+SVC_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+if [ -f "$SVC_FILE" ] && ! grep -q "python -u" "$SVC_FILE"; then
+  sed -i 's|/venv/bin/python |/venv/bin/python -u |' "$SVC_FILE"
+  systemctl daemon-reload
+  echo "🔧 service: python -u (unbuffered logs) ထည့်ပြီးပြီ"
+fi
 systemctl restart "$SERVICE_NAME"
 sleep 2
 systemctl is-active -q "$SERVICE_NAME" && echo "✅ Bot run နေပါပြီ." || echo "⚠️ Service စမရပါ: journalctl -u $SERVICE_NAME -f"

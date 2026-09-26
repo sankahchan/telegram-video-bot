@@ -816,7 +816,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                 last_err = e
                 if _is_youtube(url) and _is_botwall_error(e):
                     botwalled = True
-                    print(f"⛔ [{clients}] YouTube bot-wall — fallback chain ဆက်မယ်")
+                    print(f"⛔ [{clients}] YouTube bot-wall — fallback chain ဆက်မယ်", flush=True)
                     break
                 if not _retryable_yt_error(e):
                     raise
@@ -846,7 +846,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             try:
                 media_url, title, src = await asyncio.to_thread(
                     youtube_fallback_url, url, audio_only, quality)
-                print(f"✅ YouTube fallback via {src} — direct download")
+                print(f"✅ YouTube fallback via {src} — direct download", flush=True)
                 path, _t = await download_direct_file(
                     media_url, tmpdir, progress_cb=progress_cb,
                     loop=loop, tag=tag)
@@ -858,7 +858,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                     path = await asyncio.to_thread(normalize_web_video, path)
                 return path, title
             except Exception as fe:
-                print(f"⚠️ YouTube fallback chain failed: {fe}")
+                print(f"⚠️ YouTube fallback chain failed: {fe}", flush=True)
         # every client failed — diagnose the real cause
         diag = await _diagnose_formats(url)
         raise RuntimeError(
