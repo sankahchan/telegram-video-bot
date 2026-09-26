@@ -54,7 +54,7 @@ from web_download import (  # noqa: E402
     pot_server_hint, storyboard_only, yt_pipeline_status,
     _diagnose_formats,
 )
-from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video  # noqa: E402
+from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
 from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 from torrent_download import (  # noqa: E402
@@ -1990,6 +1990,18 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
     elif is_media and eff_quality == "low" and kind == "video":
         out = f"{tmpdir}/{idx}_low.mp4"
         cur = await compress_video(cur, out)
+    # 4. iOS-friendly remux: mkv/EAC3 etc. -> mp4/AAC (video stream-copy,
+    #    fast). iPhone can't decode AC3/EAC3/DTS audio, which plays as
+    #    silent video. Failures fall back to the original file.
+    if is_media and not as_audio and kind == "video":
+        try:
+            out = f"{tmpdir}/{idx}_ios.mp4"
+            new = await ios_remux(cur, out)
+            if new != cur:
+                print(f"📱 ios remux: {os.path.basename(cur)} -> mp4/AAC")
+                cur = new
+        except Exception as e:
+            print(f"⚠️ ios remux failed, sending original: {e}")
     return cur, as_audio
 
 

@@ -34,7 +34,7 @@ check("same inputs -> same key",
 
 # --- version constant is bumped for the normalize pipeline ----------------------
 check("CACHE_VERSION set", bool(CACHE_VERSION))
-check("CACHE_VERSION mentions normalize gen",
-      CACHE_VERSION == "v546")
+check("CACHE_VERSION bumped past v546 (v572 ios remux gen)",
+      CACHE_VERSION not in ("v546",) and CACHE_VERSION >= "v572")
 
 print(f"✅ v5.4.7: {len(PASS)} tests passed")

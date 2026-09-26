@@ -13,9 +13,9 @@ CACHE_FILE = os.path.join(DATA_DIR, "fileid_cache.json")
 TTL_SECONDS = 30 * 86400  # 30 days
 
 # Bump when the download/process pipeline changes its output (e.g. v5.4.6
-# H.264 normalization) so stale file_ids are never re-served: a repeat
-# link re-downloads once instead of replaying the old file.
-CACHE_VERSION = "v546"
+# H.264 normalization, v5.7.2 iOS remux) so stale file_ids are never
+# re-served: a repeat link re-downloads once instead of replaying the old file.
+CACHE_VERSION = "v572"
 
 
 def make_key(*parts) -> str:

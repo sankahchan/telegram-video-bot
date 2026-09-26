@@ -139,3 +139,69 @@ def probe_video(path: str) -> dict:
         return {"width": width, "height": height, "duration": duration}
     except Exception:
         return {}
+
+
+def probe_streams(path: str) -> dict:
+    """ffprobe -> {'video': codec|None, 'audio': codec|None} (first of each).
+
+    Returns {} when ffprobe is missing or probing fails.
+    """
+    if not shutil.which("ffprobe"):
+        return {}
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "stream=codec_type,codec_name",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        info = json.loads(proc.stdout or "{}")
+        out = {"video": None, "audio": None}
+        for st in info.get("streams") or []:
+            ct = st.get("codec_type")
+            if ct in out and out[ct] is None:
+                out[ct] = (st.get("codec_name") or "").lower() or None
+        return out
+    except Exception:
+        return {}
+
+
+_IOS_CONTAINER_OK = {".mp4", ".m4v", ".mov"}
+_IOS_AUDIO_OK = {"aac", "mp3"}
+
+
+async def ios_remux(src: str, dst: str) -> str:
+    """Make a video iOS-Telegram friendly WITHOUT re-encoding video.
+
+    - Other containers (mkv/avi/...) -> MP4, video stream-copied
+      (HEVC/H.264 both play on iPhone; no quality loss, fast).
+    - Non-AAC/MP3 audio (ac3/eac3/dts/opus/...) -> AAC 192k
+      (iOS can't decode AC3/EAC3/DTS, which is why some downloads
+      play video with no sound).
+    - Text subtitles kept as mov_text when possible.
+
+    Returns src unchanged when already compatible. Raises on failure
+    (callers should fall back to the original file).
+    """
+    ext = os.path.splitext(src)[1].lower()
+    streams = await asyncio.to_thread(probe_streams, src)
+    acodec = (streams or {}).get("audio")
+    if ext in _IOS_CONTAINER_OK and acodec in (None, *_IOS_AUDIO_OK):
+        return src
+    base = ["-i", src, "-map", "0:v?", "-c:v", "copy"]
+    if acodec:
+        base += ["-map", "0:a?"]
+        if acodec in _IOS_AUDIO_OK:
+            base += ["-c:a", "copy"]
+        else:
+            base += ["-c:a", "aac", "-b:a", "192k"]
+    base += ["-movflags", "+faststart"]
+    try:
+        # try 1: keep text subtitles
+        await _run_ffmpeg(base + ["-map", "0:s?", "-c:s", "mov_text", dst])
+        return dst
+    except RuntimeError:
+        pass
+    # try 2: bitmap subtitles (PGS) can't go into MP4 -> drop them
+    await _run_ffmpeg(base + ["-sn", dst])
+    return dst
