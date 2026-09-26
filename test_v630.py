@@ -200,4 +200,14 @@ check("update.sh patches existing service to python -u",
 check("fallback prints flush immediately",
       src.count("flush=True") >= 3)
 
+
+# --- 10. v6.3.3: update.sh re-execs itself after git pull ----------------------
+upd = open(os.path.join(REPO, "update.sh")).read()
+check("update.sh re-execs after pull",
+      'exec bash "$0"' in upd and "UPDATE_REEXEC" in upd)
+check("re-exec happens after git pull",
+      upd.index("git pull") < upd.index('exec bash "$0"'))
+check("service -u patch still present",
+      "python -u" in upd and "daemon-reload" in upd)
+
 print(f"\nPASS: {len(PASS)} checks")

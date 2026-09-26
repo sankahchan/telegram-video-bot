@@ -14,6 +14,13 @@ fi
 cd "$INSTALL_DIR"
 echo "📥 GitHub ကနေ အသစ်ဆွဲနေပါတယ်..."
 git pull --ff-only
+# v6.3.3: self-update re-exec — bash reads this script incrementally, so
+# without re-exec the steps below would run from the OLD file content
+# (new Restart-section patches would silently never run).
+if [ "${UPDATE_REEXEC:-}" != "1" ]; then
+  export UPDATE_REEXEC=1
+  exec bash "$0" "$@"
+fi
 echo "🔍 Code စစ်နေပါတယ်..."
 ./venv/bin/python -m py_compile bot.py store.py web_download.py media_tools.py fast_download.py generate_session.py \
   x_media.py tiktok_media.py torrent_download.py filecache.py \
