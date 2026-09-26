@@ -211,3 +211,51 @@ check("seeding disabled", "--seed-time=0" in cmd)
 check("upload capped", "--max-upload-limit=50K" in cmd)
 
 print(f"✅ v5.5.0: {len(PASS)} tests passed")
+
+# --- v5.5.1: _send_with_retry ---------------------------------------------------------------
+import ast  # noqa: E402
+import asyncio  # noqa: E402
+
+# import the whole bot module is too heavy (dotenv/pyrogram); extract the
+# function source and exec it standalone.
+_src = open("bot.py").read()
+_tree = ast.parse(_src)
+_fn = next(n for n in ast.walk(_tree)
+           if isinstance(n, ast.AsyncFunctionDef)
+           and n.name == "_send_with_retry")
+_ns = {"asyncio": asyncio}
+exec(compile(ast.Module(body=[_fn], type_ignores=[]), "bot.py", "exec"), _ns)
+_send_with_retry = _ns["_send_with_retry"]
+check("helper extracted", callable(_send_with_retry))
+
+calls = []
+
+
+async def _flaky(*a, **k):
+    calls.append(1)
+    if len(calls) < 3:
+        raise ConnectionError("transient blip")
+    return "sent"
+
+
+async def _always_fail(*a, **k):
+    calls.append(1)
+    raise ConnectionError("down")
+
+
+async def _run_retry_tests():
+    global calls
+    calls = []
+    r = await _send_with_retry(_flaky, delay=0)
+    check("retry eventually succeeds", r == "sent")
+    check("retried 3 times", len(calls) == 3)
+    calls = []
+    try:
+        await _send_with_retry(_always_fail, tries=2, delay=0)
+        check("persistent failure raises", False)
+    except ConnectionError:
+        check("persistent failure raises", True)
+    check("gave up after 2 tries", len(calls) == 2)
+
+asyncio.run(_run_retry_tests())
+print(f"✅ v5.5.1: {len(PASS)} tests passed (total)")

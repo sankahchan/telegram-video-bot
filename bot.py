@@ -1448,6 +1448,19 @@ def _swallow(fut):
         pass
 
 
+async def _send_with_retry(coro_fn, *args, tries=3, delay=5, **kwargs):
+    """Telegram send/edit with retries — a single transient ConnectTimeout
+    (VPS network blip) must not silently kill a whole download job."""
+    last = None
+    for _ in range(tries):
+        try:
+            return await coro_fn(*args, **kwargs)
+        except Exception as e:
+            last = e
+            await asyncio.sleep(delay)
+    raise last
+
+
 def make_tg_progress(status, tag, loop):
     last = [0]
 
@@ -1486,16 +1499,19 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
     if cache_key:
         hit = fcache.get(cache_key)
         if hit:
-            await emsg.reply_text("🧲 ⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
+            await _send_with_retry(
+                emsg.reply_text, "🧲 ⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
             await deliver_cached(uid, chat_id, hit, source)
             print(f"⚡ torrent cache hit -> {uid}")
             return
-    status = await emsg.reply_text("🧲 torrent ပြင်ဆင်နေပါတယ်...")
+    status = await _send_with_retry(
+        emsg.reply_text, "🧲 torrent ပြင်ဆင်နေပါတယ်...")
     with tempfile.TemporaryDirectory() as tmpdir:
         loop = asyncio.get_running_loop()
         try:
             if is_magnet_src:
-                await status.edit_text(
+                await _send_with_retry(
+                    status.edit_text,
                     "🧲 magnet metadata ရယူနေပါတယ် (DHT, ခဏကြာနိုင်)...")
                 tpath = await asyncio.to_thread(
                     fetch_magnet_metadata, source, tmpdir)
@@ -1509,12 +1525,14 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
             tname = os.path.basename(target["path"])
             size_mb = target["size"] / 1048576
             if len(files) > 1:
-                await status.edit_text(
+                await _send_with_retry(
+                    status.edit_text,
                     f"🧲 `{tname}`\n"
                     f"📦 {len(files)} files ထဲက အကြီးဆုံး video ကို ရွေးထားပါတယ် "
                     f"({size_mb:.0f}MB)")
             else:
-                await status.edit_text(
+                await _send_with_retry(
+                    status.edit_text,
                     f"🧲 `{tname}` ({size_mb:.0f}MB)")
 
             last_edit = [0.0, -1]
@@ -1527,9 +1545,11 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                     fut = status.edit_text(
                         f"🧲 `{tname}`\n"
                         f"⬇️ {done/1048576:.0f}/{size_mb:.0f}MB ({pct}%)")
-                    asyncio.run_coroutine_threadsafe(fut, loop)
+                    f2 = asyncio.run_coroutine_threadsafe(fut, loop)
+                    f2.add_done_callback(_swallow)
 
-            await status.edit_text(
+            await _send_with_retry(
+                status.edit_text,
                 f"🧲 `{tname}`\n⬇️ ဒေါင်းနေပါတယ် (0/{size_mb:.0f}MB)...")
             path = await asyncio.to_thread(
                 download_torrent, aria_src, tmpdir, target["index"],
@@ -1537,7 +1557,7 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
             ext = os.path.splitext(path)[1].lower()
             kind = ("video" if ext in _TORRENT_VIDEO_EXTS
                     else "audio" if ext in _TORRENT_AUDIO_EXTS else "doc")
-            await status.edit_text("📤 ပို့နေပါတယ်...")
+            await _send_with_retry(status.edit_text, "📤 ပို့နေပါတယ်...")
             final, as_audio = await post_process(
                 path, kind, uid, tmpdir, 0, use_trim=False)
             caption = f"🧲 {tname}"
@@ -1547,10 +1567,11 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
             await status.delete()
         except TorrentError as e:
             traceback.print_exc()
-            await status.edit_text(str(e))
+            await _send_with_retry(status.edit_text, str(e))
         except Exception as e:
             traceback.print_exc()
-            await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
+            await _send_with_retry(
+                status.edit_text, f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
