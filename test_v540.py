@@ -176,8 +176,9 @@ try:
     opts = wd._base_opts("/tmp/o", "b", ["android"], "https://youtube.com/watch?v=1")
     check("pot in _base_opts",
           opts["extractor_args"]["youtubepot-bgutilhttp"]["base_url"] == wd.POT_PROVIDER_URL)
-    check("pot keeps player_client",
-          opts["extractor_args"]["youtube"] == {"player_client": ["android"]})
+    check("pot keeps player_client + player_skip",
+          opts["extractor_args"]["youtube"] == {"player_client": ["android"],
+                                                "player_skip": ["webpage", "configs"]})
     wd._pot_ok = False  # provider down -> silent skip
     wd._pot_checked_at = time.monotonic()
     check("pot unset", wd.pot_extractor_args("https://youtube.com/watch?v=1") == {})
@@ -186,6 +187,7 @@ try:
     wd.YTDLP_PROXY = "socks5://u:p@h:1"
     opts3 = wd._base_opts("/tmp/o", "b", None, "https://tiktok.com/x")
     check("proxy set", opts3.get("proxy") == "socks5://u:p@h:1")
+    check("player_skip yt-only", "youtube" not in opts3.get("extractor_args", {}))
     wd.YTDLP_PROXY = ""
     check("proxy unset", "proxy" not in wd._base_opts("/tmp/o", "b"))
     # TTL: fresh timestamp -> cached value kept, no re-probe

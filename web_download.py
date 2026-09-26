@@ -321,8 +321,15 @@ def _base_opts(outtmpl: str, fmt: str, player_clients=None, url=""):
     # even if it returns zero formats — so clients are retried one-by-one
     # in download_web(), not as a combined list here.
     ea = {}
+    yt_ea = {}
     if player_clients:
-        ea["youtube"] = {"player_client": player_clients}
+        yt_ea["player_client"] = player_clients
+    # v6.4.2: skip YouTube webpage/config fetches — these extra requests
+    # contribute to bot-check triggering (idea from cccaaannn's downloader).
+    if _is_youtube(url):
+        yt_ea["player_skip"] = ["webpage", "configs"]
+    if yt_ea:
+        ea["youtube"] = yt_ea
     # YouTube PO-token provider (bgutil) — official extractor arg form:
     #   youtubepot-bgutilhttp:base_url=<url>
     if _is_youtube(url) and _pot_available():
