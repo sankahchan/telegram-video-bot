@@ -389,6 +389,56 @@ check("trackers appended", m0.count("tr=") == len(bot._MAGNET_TRACKERS))
 check("info_hash preserved", "d" * 40 in m0)
 check("no double-add", bot._with_trackers(m0 + "&tr=x") == m0 + "&tr=x")
 
+# --- 12. /search sort: 12 results, seeders / MP4-first --------------------
+bot.InlineKeyboardButton = FakeButton
+bot.InlineKeyboardMarkup = FakeMarkup
+R = [
+    {"info_hash": "a" * 40, "name": "Movie.2020.BluRay.x264-GRP", "size": 10**9, "seeders": 5},
+    {"info_hash": "b" * 40, "name": "Movie.2020.YTS.1080p", "size": 2 * 10**9, "seeders": 200},
+    {"info_hash": "c" * 40, "name": "Movie.2020.WEB-DL.mp4-GRP", "size": 15 * 10**8, "seeders": 50},
+]
+key = bot._search_cache_put(1, "movie 2020", R)
+check("cache key 12 hex", re.fullmatch(r"[0-9a-f]{12}", key) is not None)
+s1 = bot._search_sorted(R, "seeders")
+check("seeders sort desc", [r["seeders"] for r in s1] == [200, 50, 5])
+s2 = bot._search_sorted(R, "mp4")
+check("mp4-first", [r["info_hash"] for r in s2] == ["b" * 40, "c" * 40, "a" * 40])
+kb = bot._search_kb(key, R, "seeders")
+rows = kb.inline_keyboard
+check("sort row + 3 results", len(rows) == 4)
+check("sort buttons callbacks",
+      rows[0][0].callback_data == f"ssort:{key}:seeders"
+      and rows[0][1].callback_data == f"ssort:{key}:mp4")
+check("result buttons are dl:",
+      all(r2[0].callback_data.startswith("dl:") for r2 in rows[1:]))
+big = [{"info_hash": f"{i:040x}"[-40:], "name": f"M{i}", "size": 10**9, "seeders": i}
+       for i in range(20)]
+kb2 = bot._search_kb("k" * 12, big, "seeders")
+check("12 results shown", len(kb2.inline_keyboard) == 13)  # 1 sort row + 12
+m = re.fullmatch(r"ssort:([0-9a-f]{12}):(seeders|mp4)", f"ssort:{key}:mp4")
+check("ssort regex", m and m.group(2) == "mp4")
+src = open(os.path.join(REPO, "bot.py")).read()
+check("handler pattern includes ssort:",
+      "ssort:" in re.search(r"CallbackQueryHandler\(\s*on_button,\s*pattern=r\"([^\"]+)\"",
+                             src).group(1))
+
+# ssort_pick re-renders
+q2 = FakeQuery(uid=1)
+answered = []
+async def _ans(*a, **k):
+    answered.append((a, k))
+q2.answer = _ans
+asyncio.run(bot.ssort_pick(q2, key, "mp4"))
+check("ssort re-rendered", len(q2.msg.edits) == 1)
+check("mp4 mode in text", "MP4" in q2.msg.edits[0][0][0])
+q3 = FakeQuery(uid=999)
+answered3 = []
+async def _ans3(*a, **k):
+    answered3.append(k)
+q3.answer = _ans3
+asyncio.run(bot.ssort_pick(q3, key, "mp4"))
+check("wrong user blocked", answered3 and answered3[0].get("show_alert") is True)
+
 print(f"\nPASS: {len(PASS)} checks")
 for p in PASS:
     print(f"  ✓ {p}")

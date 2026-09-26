@@ -1945,10 +1945,55 @@ async def tv_pick(q, tvmaze_id: int):
 
 
 # ------------------------------------------------- general torrent search
+_SEARCH_CACHE: dict = {}  # key -> {"uid": int, "query": str, "results": [...]}
+_SEARCH_SHOW = 12  # buttons per search message
+
+
+def _search_cache_put(uid: int, query: str, results: list) -> str:
+    key = hashlib.sha1(f"{uid}|{query}|{time.time()}".encode()).hexdigest()[:12]
+    _SEARCH_CACHE[key] = {"uid": uid, "query": query, "results": results}
+    while len(_SEARCH_CACHE) > 50:  # drop oldest
+        _SEARCH_CACHE.pop(next(iter(_SEARCH_CACHE)))
+    return key
+
+
+def _search_sorted(results: list, mode: str) -> list:
+    if mode == "mp4":
+        mp4 = [r for r in results
+               if _search_format_tag(r["name"]).startswith("🎬")]
+        rest = [r for r in results
+                if not _search_format_tag(r["name"]).startswith("🎬")]
+        return mp4 + rest
+    return sorted(results, key=lambda r: -r["seeders"])
+
+
+def _search_kb(key: str, results: list, mode: str):
+    kb = [[
+        InlineKeyboardButton(
+            "🌱 Seeders" + (" ✓" if mode == "seeders" else ""),
+            callback_data=f"ssort:{key}:seeders"),
+        InlineKeyboardButton(
+            "🎬 MP4 အရင်" + (" ✓" if mode == "mp4" else ""),
+            callback_data=f"ssort:{key}:mp4"),
+    ]]
+    for r in _search_sorted(results, mode)[:_SEARCH_SHOW]:
+        kb.append([InlineKeyboardButton(
+            _search_label(r), callback_data=f"dl:{r['info_hash']}")])
+    return InlineKeyboardMarkup(kb)
+
+
+def _search_text(query: str, mode: str) -> str:
+    return (
+        f"🔍 \"{query}\" — ဒေါင်းချင်တာ ရွေးပါ "
+        f"({'🌱 seeders များတာအရင်' if mode == 'seeders' else '🎬 MP4 အရင်ပြ'}):\n"
+        "🎬=တိုက်ရိုက်ကြည့် 📦=convert မေးမယ် (~=ခန့်မှန်း)")
+
+
 async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/search <text> — torrent မှာ ရှိသမျှ ရှာ (movie/music/series/software)."""
     if not allowed(update):
         return
+    uid = update.effective_user.id
     query = " ".join(context.args or []).strip()
     if not query:
         await update.message.reply_text(
@@ -1962,18 +2007,29 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await status.edit_text(f"❌ ရှာမရပါ: {e}")
         return
-    results = results[:8]
     if not results:
         await status.edit_text("❌ ဒါနဲ့ကိုက်တဲ့ torrent မတွေ့ပါ.")
         return
-    kb = []
-    for r in results:
-        kb.append([InlineKeyboardButton(
-            _search_label(r), callback_data=f"dl:{r['info_hash']}")])
+    key = _search_cache_put(uid, query, results)
     await status.edit_text(
-        "🔍 တွေ့တဲ့ torrent — ဒေါင်းချင်တာ ရွေးပါ (seeders များတာကို အရင်ပြ):\n"
-        "🎬=တိုက်ရိုက်ကြည့် 📦=convert မေးမယ် (~=ခန့်မှန်း)",
-        reply_markup=InlineKeyboardMarkup(kb))
+        _search_text(query, "seeders"),
+        reply_markup=_search_kb(key, results, "seeders"))
+
+
+async def ssort_pick(q, key: str, mode: str):
+    """Search sort toggle -> re-render the same results in the new order."""
+    uid = q.from_user.id
+    entry = _SEARCH_CACHE.get(key)
+    if not entry or entry["uid"] != uid:
+        await q.answer("ဒီ search က သင့်ဟာမဟုတ်ပါ / expired", show_alert=True)
+        return
+    await q.answer()
+    try:
+        await q.edit_message_text(
+            _search_text(entry["query"], mode),
+            reply_markup=_search_kb(key, entry["results"], mode))
+    except Exception:
+        pass
 
 
 def _search_label(r: dict) -> str:
@@ -2636,6 +2692,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = re.fullmatch(r"dlc:([0-9a-f]{40}):([yn])", q.data or "")
     if m:
         await dlc_pick(q, m.group(1), m.group(2) == "y")
+        return
+    m = re.fullmatch(r"ssort:([0-9a-f]{12}):(seeders|mp4)", q.data or "")
+    if m:
+        await ssort_pick(q, m.group(1), m.group(2))
         return
     m = re.fullmatch(r"subm:(tt\d+)", q.data or "")
     if m:
@@ -4018,7 +4078,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
         on_button,
-        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|dlc:|menu:|subm:|subs:).*"))
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|dlc:|ssort:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
