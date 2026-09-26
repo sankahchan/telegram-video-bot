@@ -109,7 +109,7 @@ automatically tries third-party frontends running on non-flagged IPs:
 
 1. **Cobalt** — only if `COBALT_API_URL` is set (self-hosted instance):
    ```bash
-   docker run -d --name cobalt -p 127.0.0.1:9000:9000 ghcr.io/imput/cobalt:latest
+   docker run -d --name cobalt --restart unless-stopped -p 127.0.0.1:9000:9000 ghcr.io/imputnet/cobalt
    ```
    then `COBALT_API_URL=http://127.0.0.1:9000/` (and `COBALT_API_KEY=` if your
    instance needs one).

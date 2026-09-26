@@ -144,6 +144,21 @@ print('  ✅ POT_PROVIDER_URL သိမ်းပြီးပါပြီ')
 fi
 
 echo ""
+echo "🧩 Cobalt self-hosted (optional — YouTube bot-wall fallback အတွက် ကိုယ်ပိုင် instance)"
+echo "   run ထားရင် API URL ထည့်ပါ, မရှိရင် Enter နှိပ် (နောက်မှ ပြင်လို့ရ)"
+echo "   run ရန် (Docker):"
+echo "     docker run --name cobalt -d --restart unless-stopped -p 127.0.0.1:9000:9000 \\"
+echo "       ghcr.io/imputnet/cobalt"
+read -rp "  COBALT_API_URL [Enter=skip]: " COBALT_URL
+if [ -n "$COBALT_URL" ]; then
+  ./venv/bin/python -c "
+from dotenv import set_key
+set_key('.env', 'COBALT_API_URL', '''$COBALT_URL'''.strip())
+print('  ✅ COBALT_API_URL သိမ်းပြီးပါပြီ')
+"
+fi
+
+echo ""
 echo "⚙️ systemd service သွင်းနေပါတယ်..."
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
