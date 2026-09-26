@@ -57,6 +57,7 @@ from web_download import (  # noqa: E402
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux, ios_container_ok  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
+from filehost import detect_filehost  # noqa: E402
 from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 from torrent_download import (  # noqa: E402
     is_magnet, extract_magnets, have_aria2, fetch_magnet_metadata,
@@ -2661,6 +2662,8 @@ def _prompt_needed(jobs, tg_cache) -> bool:
             m = tg_cache.get(ref)
             if m is not None and media_kind(m) == "video":
                 return True
+        elif detect_filehost(ref):
+            continue  # file hosts: no quality choice, download as-is
         elif not looks_like_direct_file(ref):
             return True  # YouTube/TikTok/... -> video
         elif direct_file_kind(ref) == "video":
@@ -3541,7 +3544,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await emsg.reply_text(
             "❌ Link ပုံစံ မှားနေပါတယ်.\n"
             "Telegram: https://t.me/c/1234567890/123\n"
-            "Web: YouTube / TikTok / Facebook / Instagram / X link"
+            "Web: YouTube / TikTok / Facebook / Instagram / X link\n"
+            "File: Google Drive / MEGA / MediaFire / pCloud link"
         )
         return
 
@@ -3737,7 +3741,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             path, title = await download_web(
                                 url, tmpdir, quality=quality or s["quality"],
                                 progress_cb=web_progress, loop=loop, tag=tag)
-                            wk = "video"
+                            # file hosts return arbitrary files — kind by
+                            # extension so zips/docs send correctly
+                            wk = (direct_file_kind(path) if detect_filehost(url)
+                                  else "video")
                         except Exception as e:
                             if "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__:
                                 path, title = await download_direct_file(
@@ -4002,7 +4009,8 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                         else:
                             path, title = await download_web(
                                 url, tmpdir, quality=nq)
-                            wk = "video"
+                            wk = (direct_file_kind(path) if detect_filehost(url)
+                                  else "video")
                         pp_notes: list = []
                         final, as_audio = await post_process(
                             path, wk, uid, tmpdir, 0, use_trim=False,

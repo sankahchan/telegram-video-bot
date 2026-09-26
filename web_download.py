@@ -416,6 +416,12 @@ def web_info(url: str) -> dict:
 
 async def probe_size(url: str):
     """Return approx file size in MB (None if unknown). No download."""
+    # v6.5.0: file hosts (MEGA/MediaFire/pCloud) have no yt-dlp probe —
+    # size unknown without downloading, so night-queue them (None).
+    from filehost import detect_filehost as _detect_fh
+    if _detect_fh(url):
+        return None
+
     def _run():
         from yt_dlp import YoutubeDL
         opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
@@ -757,6 +763,19 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         except TikTokMediaError as e:
             tiktok_error = e
             print(f"⚠️ TikTok cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
+
+    # File hosts (MEGA / MediaFire / pCloud) BEFORE yt-dlp — yt-dlp has no
+    # extractors for them, so they download directly instead. (Google Drive
+    # needs no special case: yt-dlp ships a GoogleDrive extractor.)
+    # v6.5.0
+    from filehost import (detect_filehost, download_filehost,
+                          FileHostError as _FileHostError)
+    if detect_filehost(url):
+        try:
+            return await download_filehost(
+                url, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+        except _FileHostError as e:
+            raise RuntimeError(e.message)
 
     if audio_only:
         fmts = ["ba/b", "b"]

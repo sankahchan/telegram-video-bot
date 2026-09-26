@@ -8,3 +8,4 @@ bgutil-ytdlp-pot-provider>=1.1.0
 feedparser>=6.0.0
 google-api-python-client>=2.0.0
 google-auth-oauthlib>=1.0.0
+mega.py
