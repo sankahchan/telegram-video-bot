@@ -58,6 +58,37 @@ _ROW_RE = re.compile(
     re.S)
 
 
+LANG_ALIASES = {
+    "en": "English", "eng": "English", "english": "English",
+    "mm": "Burmese", "my": "Burmese", "burmese": "Burmese", "myanmar": "Burmese",
+    "fr": "French", "french": "French",
+    "es": "Spanish", "spanish": "Spanish",
+    "de": "German", "german": "German",
+    "zh": "Chinese", "chinese": "Chinese",
+    "ja": "Japanese", "japanese": "Japanese",
+    "ko": "Korean", "korean": "Korean",
+    "th": "Thai", "thai": "Thai",
+}
+
+
+def movie_languages(imdb: str, timeout: int = 25) -> list:
+    """Available languages on the movie page, most-subs first
+    (English pinned first if present)."""
+    r = httpx.get(f"{YIFY_BASE}/movie-imdb/{imdb}",
+                  timeout=timeout, headers=_UA)
+    r.raise_for_status()
+    counts = {}
+    for _sid, _rating, slang, _href, _cell in _ROW_RE.findall(r.text):
+        lang = slang.strip()
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+    langs = sorted(counts, key=lambda l: -counts[l])
+    if "English" in langs:
+        langs.remove("English")
+        langs.insert(0, "English")
+    return langs[:12]
+
+
 def movie_subtitles(imdb: str, lang: str = "English",
                     timeout: int = 25) -> tuple:
     """-> (movie_title, [subs]) where sub =

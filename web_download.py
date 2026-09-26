@@ -364,6 +364,45 @@ def _hook(progress_cb, loop, tag):
     return hook
 
 
+def web_info(url: str) -> dict:
+    """No-download probe -> {title, duration, uploader, site, formats}.
+
+    formats: [{ext, height, mb|None}] top-4 by resolution, deduped.
+    Raises on failure.
+    """
+    from yt_dlp import YoutubeDL
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    ck = _cookie_for(url)
+    if ck:
+        opts["cookiefile"] = ck
+    if YTDLP_PROXY:
+        opts["proxy"] = YTDLP_PROXY
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        raise RuntimeError("info ရမရပါ")
+    best = {}
+    for f in info.get("formats") or []:
+        if (f.get("vcodec") or "none") == "none":
+            continue
+        h = f.get("height") or 0
+        sz = f.get("filesize") or f.get("filesize_approx")
+        cur = best.get(h)
+        if cur is None or (sz or 0) > (cur.get("_sz") or 0):
+            best[h] = {"ext": f.get("ext") or "?",
+                       "height": h,
+                       "mb": round(sz / 1048576, 1) if sz else None,
+                       "_sz": sz or 0}
+    fmts = sorted(best.values(), key=lambda x: -x["height"])[:4]
+    for x in fmts:
+        x.pop("_sz", None)
+    return {"title": info.get("title") or "?",
+            "duration": info.get("duration"),
+            "uploader": info.get("uploader") or info.get("channel"),
+            "site": info.get("extractor_key") or "?",
+            "formats": fmts}
+
+
 async def probe_size(url: str):
     """Return approx file size in MB (None if unknown). No download."""
     def _run():

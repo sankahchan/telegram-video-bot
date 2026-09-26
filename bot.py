@@ -52,7 +52,7 @@ from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
     download_direct_file, looks_like_direct_file, direct_file_kind,
     pot_server_hint, storyboard_only, yt_pipeline_status,
-    _diagnose_formats,
+    _diagnose_formats, web_info,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
@@ -67,7 +67,8 @@ from follow import (  # noqa: E402
     tvmaze_search, tvmaze_show, fetch_eztv_items, select_releases,
     apibay_search, fmt_size,
 )
-from subs import search_movies, movie_subtitles, download_subtitle  # noqa: E402
+from subs import (search_movies, movie_subtitles, movie_languages,
+                      download_subtitle, LANG_ALIASES)  # noqa: E402
 import gdrive  # noqa: E402  (google libs imported lazily inside)
 
 from pyrogram import Client as PyroClient
@@ -125,11 +126,15 @@ night_q = QueueStore()
 settings = SettingsStore()
 fcache = FileIdCache()  # URL -> Telegram file_id (instant repeat delivery)
 follows = FollowStore()  # torrent RSS auto-follow
+bookmarks = BookmarkStore()  # per-user saved links
 
 # In-memory pending states
 pending_trim = {}      # uid -> (start_sec, end_sec)
 pending_finds = {}     # uid -> [(chat_id, msg_id, label)]
 pending_quality = {}   # uid -> {"token", "text", "trim", "ts"} (quality prompt)
+pending_history = {}   # uid -> [stats entries] (for /history resend)
+pending_sublangs = {}  # uid -> {imdb, langs[]} (/subs language step)
+pending_sub_lang = {}  # uid -> preferred lang from '/subs x mm'
 pending_drive = {}     # token -> {"uid","chat_id","source","is_magnet","tname","size","tdata","ts"}
 
 
@@ -140,6 +145,20 @@ def allowed_uid(uid: int) -> bool:
     if uid not in user_store.allowed_ids():
         return False
     return not user_store.is_expired(uid)
+
+
+def quota_allows(uid: int):
+    """(ok, used_mb, quota_mb|None) — rolling 30-day download quota."""
+    q = user_store.quota_mb(uid)
+    if not q:
+        return True, 0.0, None
+    used = stats.usage(uid, days=30)
+    return used < q, used, q
+
+
+def quota_block_msg(used: float, quota: float) -> str:
+    return (f"📊 Quota ကုန်သွားပါပြီ ({used:.0f}/{quota:.0f} MB, ရက် 30 အတွင်း) — "
+            "ဆက်သုံးချင်ရင် owner ကို ဆက်သွယ်ပါ.")
 
 
 _expired_notice = {}  # uid -> day string (notify at most once/day)
@@ -215,6 +234,9 @@ WELCOME = (
     "/follow <rss-url> [name] — series episode အသစ် auto-download\n"
     "/unfollow /follows\n"
     "/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ်\n"
+    "/history — ဒေါင်းခဲ့တာတွေ ပြန်ပို့\n"
+    "/info <link> — မဒေါင်းခင် info ကြိုကြည့်\n"
+    "/bookmark <link> — link သိမ်း\n"
     "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး (အလွယ်ဆုံး)\n"
     "/search <text> — torrent အကုန် ရှာ (movie/music/series/software)\n"
     "/subs <movie> — subtitle (.srt) ရှာ\n"
@@ -247,15 +269,20 @@ HELP_OVERVIEW = (
     "/watch — post အသစ် auto-download\n"
     "/unwatch /watchlist\n"
     "/follow — series RSS, episode အသစ် auto-download\n"
-    "/unfollow /follows\n"
+    "/unfollow /follows — ⬇️ auto ↔ 🔔 notify-only ပြောင်းလို့ရ\n"
     "/tv — bot ထဲကနေ series ရှာ + follow (website မလို)\n"
     "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး\n"
     "/search — torrent အကုန် ရှာ + ဒေါင်း\n"
-    "/subs — subtitle (.srt) ရှာ\n"
+    "/subs — subtitle (.srt) ရှာ (ဘာသာစကား ရွေး)\n"
+    "/history — ဒေါင်းခဲ့တာတွေ, နှိပ်တာနဲ့ ပြန်ပို့\n"
+    "/info — link info ကြိုကြည့် (မဒေါင်းခင်)\n"
+    "/bookmark — link သိမ်း, /bookmarks — သိမ်းထားတာတွေ\n"
+    "/quota — ကိုယ့် download quota ကြည့်\n"
     "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
     "/extend <id> <months> — extend user subscription (owner only)\n"
+    "/quota <id> [GB|off] — user download quota သတ် (owner only)\n"
     "/admin — 👑 admin panel (owner only)\n"
     "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
     "/xtimeline — X profile ရဲ့ latest video တွေ\n"
@@ -392,7 +419,58 @@ HELP_TOPICS = {
     "follows": (
         "📡 /follows — Follow လုပ်ထားတဲ့ series များ ကြည့်\n\n"
         "အသုံးပြုပုံ / Usage:\n"
-        "  /follows"
+        "  /follows\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• ခလုတ်နှိပ်ပြီး ⬇️ auto-download ↔ 🔔 notify-only ပြောင်းလို့ရတယ်\n"
+        "• notify-only ဆို episode အသစ်ကျမှ အကြောင်းကြားရုံ (download မလုပ်)"
+    ),
+    "history": (
+        "🕘 /history — ဒေါင်းခဲ့တာတွေ ပြန်ပို့\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /history\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• အသစ်ဆုံး 10 ခု ပြမယ်\n"
+        "• ↩️ ခလုတ်နှိပ်ရင် cache ထဲက ချက်ချင်းပို့ (မရှိရင် ပြန်ဒေါင်း)"
+    ),
+    "info": (
+        "ℹ️ /info — Link info ကြိုကြည့် (မဒေါင်းခင်)\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /info <link>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /info https://t.me/c/123/456\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• magnet → file list + size\n"
+        "• t.me → media kind/size/duration\n"
+        "• web video → title/duration/quality တွေ"
+    ),
+    "bookmark": (
+        "🔖 /bookmark — Link သိမ်းထား, နောက်မှ ဒေါင်း\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /bookmark <link>\n"
+        "  /bookmarks        — သိမ်းထားတာတွေ (⬇️ ဒေါင်း / 🗑️ ဖျက်)\n"
+        "  /unbookmark <နံပါတ်> — ဖျက်"
+    ),
+    "bookmarks": (
+        "🔖 /bookmarks — သိမ်းထားတဲ့ link တွေ\n\n"
+        "/bookmark <link> နဲ့ သိမ်း — /bookmarks မှာ\n"
+        "⬇️ နှိပ်ရင် ဒေါင်း, 🗑️ နှိပ်ရင် ဖျက်."
+    ),
+    "unbookmark": (
+        "🗑️ /unbookmark — Bookmark ဖျက်\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /unbookmark <နံပါတ်>\n"
+        "(နံပါတ်ကို /bookmarks မှာ ကြည့်)"
+    ),
+    "quota": (
+        "📊 /quota — Download quota\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /quota              — ကိုယ့် quota ကြည့်\n"
+        "  /quota <id> [GB|off] — owner only: user quota သတ်/ဖြုတ်\n\n"
+        "ဥပမာ / Example:\n"
+        "  /quota 123456789 50   (30 ရက်ကို 50GB)\n"
+        "  /quota 123456789 off  (unlimited)\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• quota ကုန်ရင် download ရပ်မယ် — owner ကို ဆက်သွယ်ပါ"
     ),
     "tv": (
         "🔍 /tv — Bot ထဲကနေ series ရှာပြီး follow လုပ်\n\n"
@@ -415,10 +493,11 @@ HELP_TOPICS = {
         "အသုံးပြုပုံ / Usage:\n"
         "  /subs <movie နာမည်>\n\n"
         "ဥပမာ / Example:\n"
-        "  /subs dune part two\n\n"
+        "  /subs dune part two\n"
+        "  /subs dune part two mm  (မြန်မာ subtitle)\n\n"
         "မှတ်ချက် / Note:\n"
-        "• English subtitles (YIFY database)\n"
-        "• ရွေးပြီးရင် .srt file တန်းပို့ပေးမယ်"
+        "• movie ရွေးပြီးရင် ဘာသာစကား ရွေးရမယ် (English အပါအဝင်)\n"
+        "• YIFY database — ရွေးပြီးရင် .srt file တန်းပို့ပေးမယ်"
     ),
     "search": (
         "🔎 /search — Torrent အကုန် ရှာပြီး ဒေါင်း\n\n"
@@ -1032,7 +1111,12 @@ def _user_line(u: dict) -> str:
         else:
             st_txt = f"✅ {days:.0f} ရက် ကျန် ({dstr})"
     name = f" @{u['name']}" if u.get("name") else ""
-    return f"• `{uid}`{name}{tag} — {st_txt}"
+    q = user_store.quota_mb(uid)
+    qtxt = ""
+    if q:
+        used = stats.usage(uid, days=30)
+        qtxt = f" 📊 {used:.0f}/{q:.0f}MB"
+    return f"• `{uid}`{name}{tag} — {st_txt}{qtxt}"
 
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1067,9 +1151,326 @@ def _admin_text() -> str:
         "/adduser <id> [လ] — user ထည့် (ဥ: `/adduser 123 3`)",
         "/extend <id> <လ> — သက်တမ်း တိုး",
         "/deluser <id> — user ဖြုတ်",
-        "/users — user list အသေးစိတ်",
+        "/users — user list အသေးစိတ် (quota အပါအဝင်)",
+        "/quota <id> <GB|off> — user download quota သတ်/ဖြုတ်",
     ]
     return "\n".join(lines)
+
+
+def _magnet_info(magnet: str) -> str:
+    """Sync (run in thread): magnet -> name/size/file list."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tpath = fetch_magnet_metadata(magnet, tmpdir)
+        files = torrent_files(tpath)
+    if not files:
+        return "❌ file list ရမရပါ"
+    total = sum(f["size"] for f in files)
+    name = files[0]["path"].strip("/").split("/")[0]
+    lines = [f"🧲 {name}",
+             f"📁 {len(files)} files • 💾 {total / 1073741824:.2f} GB"]
+    for f in sorted(files, key=lambda x: -x["size"])[:5]:
+        base = os.path.basename(f["path"])[:42]
+        lines.append(f"• {base} — {f['size'] / 1048576:.0f}MB")
+    if len(files) > 5:
+        lines.append(f"… +{len(files) - 5} more")
+    lines.append("⬇️ ဒေါင်းချင်ရင် magnet ကို ဒီအတိုင်းပို့လိုက်ပါ")
+    return "\n".join(lines)
+
+
+async def _tg_info(m) -> str:
+    """t.me link -> media kind/size/duration."""
+    private_id, username, msg_id, thread_msg_id = m.groups()
+    mid = int(thread_msg_id or msg_id)
+    cid = int(f"-100{private_id}") if private_id else username
+    msg, _, err = await fetch_message(cid, mid)
+    if not msg or not media_of(msg):
+        return f"❌ မရပါ: {friendly_peer_error(err) or (err or 'media မရှိ')}"
+    media = media_of(msg)
+    kind = media_kind(msg)
+    size = getattr(media, "file_size", 0) or 0
+    dur = getattr(media, "duration", 0) or 0
+    dur_txt = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
+    cap = (msg.caption or "")[:60]
+    out = [f"✈️ Telegram [{kind}]",
+           f"💾 {size / 1048576:.1f} MB",
+           f"⏱️ {dur_txt}"]
+    if cap:
+        out.append(f"💬 {cap}")
+    out.append("⬇️ ဒေါင်းချင်ရင် link ကို ဒီအတိုင်းပို့လိုက်ပါ")
+    return "\n".join(out)
+
+
+def _web_info_text(d: dict) -> str:
+    dur = d.get("duration")
+    dur_txt = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
+    out = [f"🌐 {(d.get('title') or '?')[:70]}",
+           f"📺 {d.get('site') or '?'}" +
+           (f" • 👤 {(d.get('uploader') or '')[:30]}" if d.get("uploader") else ""),
+           f"⏱️ {dur_txt}"]
+    for f in d.get("formats") or []:
+        res = f"{f['height']}p" if f.get("height") else "?"
+        sz = f" • {f['mb']:.0f}MB" if f.get("mb") else ""
+        out.append(f"• {res} ({f.get('ext') or '?'}){sz}")
+    out.append("⬇️ ဒေါင်းချင်ရင် link ကို ဒီအတိုင်းပို့လိုက်ပါ")
+    return "\n".join(out)
+
+
+def _looks_bookmarkable(text: str) -> bool:
+    return bool(extract_magnets(text) or LINK_RE.search(text)
+                or extract_web_urls(text))
+
+
+def _bookmarks_kb(items: list):
+    kb = []
+    for i, b in enumerate(items):
+        kb.append([
+            InlineKeyboardButton(f"⬇️ {i + 1}", callback_data=f"bm:dl:{i}"),
+            InlineKeyboardButton(f"🗑️ {i + 1}", callback_data=f"bm:del:{i}"),
+        ])
+    return InlineKeyboardMarkup(kb) if kb else None
+
+
+def _bookmarks_text(items: list) -> str:
+    lines = ["🔖 **Bookmarks** (⬇️=ဒေါင်း, 🗑️=ဖျက်):"]
+    for i, b in enumerate(items):
+        ts = time.strftime("%m-%d", time.localtime(b.get("ts", 0)))
+        lines.append(f"{i + 1}. `{ts}` {(b.get('title') or '')[:55]}")
+    return "\n".join(lines)
+
+
+async def bookmark_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bookmark <link> — link သိမ်းထား, နောက်မှ ဒေါင်း."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    text = " ".join(context.args or []).strip()
+    if not text or not _looks_bookmarkable(text):
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /bookmark <link>\n"
+            "(web video / magnet / t.me link)")
+        return
+    # first link-ish token only
+    token = text.split()[0]
+    if bookmarks.add(uid, token, token[:60]):
+        n = len(bookmarks.list(uid))
+        await update.message.reply_text(
+            f"🔖 သိမ်းပြီးပါပြီ ({n} ခု) — /bookmarks နဲ့ ကြည့်ပါ.")
+    else:
+        await update.message.reply_text("ℹ️ ဒီ link သိမ်းပြီးသားပါ.")
+
+
+async def bookmarks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bookmarks — သိမ်းထားတဲ့ link တွေ."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    items = bookmarks.list(uid)
+    if not items:
+        await update.message.reply_text(
+            "🔖 Bookmark မရှိသေးပါ — /bookmark <link> နဲ့ သိမ်းပါ.")
+        return
+    await update.message.reply_text(
+        _bookmarks_text(items), parse_mode="Markdown",
+        disable_web_page_preview=True,
+        reply_markup=_bookmarks_kb(items))
+
+
+async def unbookmark_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/unbookmark <နံပါတ်> — bookmark ဖျက်."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /unbookmark <နံပါတ်>\n"
+            "(/bookmarks မှာ နံပါတ်ကြည့်ပါ)")
+        return
+    if bookmarks.remove(uid, int(args[0]) - 1):
+        await update.message.reply_text("🗑️ ဖျက်ပြီးပါပြီ.")
+    else:
+        await update.message.reply_text("❌ နံပါတ် မှားနေပါတယ်.")
+
+
+async def bm_pick(q, update, context, action: str, idx: int):
+    uid = q.from_user.id
+    items = bookmarks.list(uid)
+    if idx >= len(items):
+        try:
+            await q.answer("မရှိတော့ပါ — /bookmarks ပြန်နှိပ်ပါ",
+                           show_alert=True)
+        except Exception:
+            pass
+        return
+    if action == "del":
+        bookmarks.remove(uid, idx)
+        items = bookmarks.list(uid)
+        try:
+            if items:
+                await q.edit_message_text(
+                    _bookmarks_text(items), parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=_bookmarks_kb(items))
+            else:
+                await q.edit_message_text("🔖 Bookmark ကုန်သွားပါပြီ.")
+        except Exception:
+            pass
+        return
+    # dl
+    try:
+        await q.edit_message_text(
+            f"🔖 bookmark {idx + 1} ဒေါင်းနေပါတယ်...")
+    except Exception:
+        pass
+    await handle_link(update, context, text=items[idx]["url"], prompt=False)
+
+
+async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/info <link> — မဒေါင်းခင် info ကြိုကြည့် (magnet/t.me/web)."""
+    if not allowed(update):
+        return
+    text = " ".join(context.args or []).strip()
+    if not text:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /info <link>\n"
+            "ဥပမာ: /info https://t.me/c/123/456\n"
+            "(magnet / web video link လည်း ရပါတယ်)")
+        return
+    status = await update.message.reply_text("ℹ️ info ယူနေပါတယ်...")
+    try:
+        magnets = extract_magnets(text)
+        if magnets:
+            txt = await asyncio.to_thread(_magnet_info, magnets[0])
+        else:
+            m = LINK_RE.search(text)
+            if m:
+                txt = await _tg_info(m)
+            else:
+                d = await asyncio.wait_for(
+                    asyncio.to_thread(web_info, text), timeout=90)
+                txt = _web_info_text(d)
+        await status.edit_text(txt, disable_web_page_preview=True)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ info ရမရပါ: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _history_view(uid: int):
+    """-> (text, InlineKeyboardMarkup|None) — shared by /history and menu."""
+    items = stats.recent(uid, 10)
+    if not items:
+        return "🕘 History မရှိသေးပါ — link ပို့ပြီး စဒေါင်းပါ.", None
+    pending_history[uid] = items
+    lines = ["🕘 **Download history** (အသစ်ဆုံး 10):"]
+    kb = []
+    for i, it in enumerate(items):
+        ts = time.strftime("%m-%d %H:%M", time.localtime(it.get("ts", 0)))
+        kind, mb = it.get("kind", "?"), it.get("mb", 0) or 0
+        label = (it.get("url") or "")[:50] or kind
+        lines.append(f"{i + 1}. `{ts}` [{kind}] {mb:.0f}MB\n   {label}")
+        if it.get("url") or it.get("ckey"):
+            kb.append([InlineKeyboardButton(f"↩️ {i + 1} ပြန်ပို့",
+                                            callback_data=f"hist:{i}")])
+    return "\n".join(lines), InlineKeyboardMarkup(kb) if kb else None
+
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🕘 /history — ဒေါင်းခဲ့တာတွေ, နှိပ်တာနဲ့ ပြန်ပို့."""
+    if not allowed(update):
+        return
+    text, kb = _history_view(update.effective_user.id)
+    await update.message.reply_text(
+        text, parse_mode="Markdown", disable_web_page_preview=True,
+        reply_markup=kb)
+
+
+async def hist_pick(q, update, context, idx: int):
+    """History resend: file_id cache -> instant, else re-download URL."""
+    uid = q.from_user.id
+    items = pending_history.get(uid, [])
+    if idx >= len(items):
+        try:
+            await q.edit_message_text("⏰ သက်တမ်းကုန်သွားပါပြီ — /history ပြန်နှိပ်ပါ.")
+        except Exception:
+            pass
+        return
+    it = items[idx]
+    ckey = it.get("ckey")
+    if ckey:
+        hit = fcache.get(ckey)
+        if hit:
+            try:
+                await q.edit_message_text("⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
+            except Exception:
+                pass
+            await deliver_cached(uid, q.message.chat_id, hit,
+                                 it.get("url") or "")
+            return
+    url = it.get("url")
+    if url:
+        try:
+            await q.edit_message_text("🔄 ပြန်ဒေါင်းနေပါတယ်...")
+        except Exception:
+            pass
+        await handle_link(update, context, text=url, prompt=False)
+    else:
+        try:
+            await q.answer("cache သက်တမ်းကုန်သွားပါပြီ", show_alert=True)
+        except Exception:
+            pass
+
+
+async def quota_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📊 Quota: /quota (ကိုယ့်ဟာ) | /quota <id> [GB|off] (owner)."""
+    uid = update.effective_user.id
+    if not allowed(update):
+        return
+    args = context.args or []
+
+    def _usage_text(tid: int) -> str:
+        ok, used, q = quota_allows(tid)
+        if q is None:
+            return f"📊 User `{tid}` quota: ♾️ unlimited"
+        pct = used / q if q else 0
+        flag = "❌ ကုန်ပြီ" if not ok else ("⚠️ နီးနေပြီ" if pct >= 0.8 else "✅")
+        return (f"📊 User `{tid}` quota: {used:.0f}/{q:.0f} MB "
+                f"(ရက် 30) {flag}")
+
+    if not args:
+        await update.message.reply_text(_usage_text(uid), parse_mode="Markdown")
+        return
+    if not is_owner(uid):
+        await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
+        return
+    ids = re.findall(r"\d+", args[0])
+    if not ids:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /quota <Telegram ID> [GB|off]\n"
+            "ဥပမာ: /quota 123456789 50")
+        return
+    tid = int(ids[0])
+    if len(args) == 1:
+        await update.message.reply_text(_usage_text(tid), parse_mode="Markdown")
+        return
+    val = args[1].lower()
+    if val in ("off", "0", "unlimited"):
+        if user_store.set_quota(tid, None):
+            await update.message.reply_text(f"✅ User {tid} quota ဖြုတ်ပြီးပါပြီ (unlimited).")
+        else:
+            await update.message.reply_text("ℹ️ ဒီ user list ထဲမှာ မရှိပါ.")
+        return
+    try:
+        gb = float(val)
+        if gb <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ GB မှားနေပါတယ် — ဥပမာ: /quota 123456789 50")
+        return
+    if user_store.set_quota(tid, gb * 1024):
+        await update.message.reply_text(
+            f"✅ User {tid} quota: {gb:g} GB / 30 ရက် သတ်မှတ်ပြီးပါပြီ.")
+    else:
+        await update.message.reply_text("ℹ️ ဒီ user list ထဲမှာ မရှိပါ.")
 
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1402,7 +1803,9 @@ async def follows_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📡 Follow လုပ်ထားတာ မရှိသေးပါ.\n"
             "🔍 /tv <series> ဒါမှမဟုတ် /follow <rss-url> နဲ့ ထည့်ပါ.")
         return
-    await update.message.reply_text(_follows_text(uid))
+    await update.message.reply_text(
+        _follows_text(uid) + "\n\n_ခလုတ်နှိပ်ပြီး ⬇️ auto-download ↔ 🔔 notify-only ပြောင်းပါ_",
+        parse_mode="Markdown", reply_markup=_follows_kb(uid))
 
 
 # ------------------------------------------------- in-bot series search (/tv)
@@ -1535,12 +1938,18 @@ async def subs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/subs <movie name> — subtitle (.srt) ရှာပြီး ပို့."""
     if not allowed(update):
         return
-    query = " ".join(context.args or []).strip()
+    args = list(context.args or [])
+    lang_pref = None
+    if args and args[-1].lower() in LANG_ALIASES:
+        lang_pref = LANG_ALIASES[args.pop().lower()]
+    pending_sub_lang[update.effective_user.id] = lang_pref
+    query = " ".join(args).strip()
     if not query:
         await update.message.reply_text(
-            "အသုံးပြုပုံ: /subs <movie နာမည်>\n"
+            "အသုံးပြုပုံ: /subs <movie နာမည်> [ဘာသာစကား]\n"
             "ဥပမာ: /subs dune part two\n"
-            "(English subtitles, YIFY database)")
+            "ဥပမာ: /subs dune part two mm  (မြန်မာ subtitle)\n"
+            "(YIFY database)")
         return
     status = await update.message.reply_text(f"📝 \"{query}\" ရှာနေပါတယ်...")
     try:
@@ -1552,7 +1961,8 @@ async def subs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ ဒါနဲ့ကိုက်တဲ့ movie မတွေ့ပါ.")
         return
     if len(movies) == 1:
-        await _show_subs(status, movies[0]["imdb"])
+        await _subs_movie(status, update.effective_user.id,
+                          movies[0]["imdb"], lang_pref)
         return
     kb = [[InlineKeyboardButton(
         m["movie"][:50], callback_data=f"subm:{m['imdb']}")]
@@ -1561,17 +1971,42 @@ async def subs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def _show_subs(msg, imdb: str):
-    """Movie page -> English subtitle buttons."""
+async def _subs_movie(msg, uid: int, imdb: str, lang: str | None):
+    """lang given (/subs x mm) -> straight to subs, else language picker."""
+    if lang:
+        await _show_subs(msg, imdb, lang)
+    else:
+        await _show_langs(msg, uid, imdb)
+
+
+async def _show_langs(msg, uid: int, imdb: str):
+    """Movie page -> language buttons."""
     try:
-        title, subs = await asyncio.to_thread(movie_subtitles, imdb)
+        langs = await asyncio.to_thread(movie_languages, imdb)
+    except Exception as e:
+        await msg.edit_text(f"❌ subtitle ရမရပါ: {e}")
+        return
+    if not langs:
+        await msg.edit_text("❌ ဒီ movie အတွက် subtitle မတွေ့ပါ.")
+        return
+    pending_sublangs[uid] = {"imdb": imdb, "langs": langs}
+    kb = [[InlineKeyboardButton(l, callback_data=f"subl:{i}")]
+          for i, l in enumerate(langs)]
+    await msg.edit_text("🌐 ဘယ်ဘာသာစကားလဲ ရွေးပါ:",
+                        reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def _show_subs(msg, imdb: str, lang: str = "English"):
+    """Movie page -> subtitle buttons in `lang`."""
+    try:
+        title, subs = await asyncio.to_thread(movie_subtitles, imdb, lang)
     except Exception as e:
         await msg.edit_text(f"❌ subtitle ရမရပါ: {e}")
         return
     subs = subs[:8]
     if not subs:
         await msg.edit_text(
-            f"❌ \"{title}\" အတွက် English subtitle မတွေ့ပါ.")
+            f"❌ \"{title}\" အတွက် {lang} subtitle မတွေ့ပါ.")
         return
     kb = []
     for s in subs:
@@ -1579,16 +2014,35 @@ async def _show_subs(msg, imdb: str):
         star = f" ⭐{s['rating']}" if s["rating"] > 0 else ""
         kb.append([InlineKeyboardButton(
             f"{rel}{star}", callback_data=f"subs:{s['slug']}")])
-    await msg.edit_text(f"📝 \"{title}\" — subtitle ရွေးပါ:",
+    await msg.edit_text(f"📝 \"{title}\" ({lang}) — subtitle ရွေးပါ:",
                         reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def subm_pick(q, imdb: str):
+    uid = q.from_user.id
+    lang = pending_sub_lang.get(uid)
     try:
         await q.edit_message_text("📝 subtitle တွေ ယူနေပါတယ်...")
     except Exception:
         pass
-    await _show_subs(q.message, imdb)
+    await _subs_movie(q.message, uid, imdb, lang)
+
+
+async def subl_pick(q, idx: int):
+    uid = q.from_user.id
+    pend = pending_sublangs.get(uid)
+    if not pend or idx >= len(pend["langs"]):
+        try:
+            await q.edit_message_text("⏰ သက်တမ်းကုန်သွားပါပြီ — /subs ပြန်နှိပ်ပါ.")
+        except Exception:
+            pass
+        return
+    lang = pend["langs"][idx]
+    try:
+        await q.edit_message_text(f"📝 {lang} subtitle တွေ ယူနေပါတယ်...")
+    except Exception:
+        pass
+    await _show_subs(q.message, pend["imdb"], lang)
 
 
 async def subs_pick(q, slug: str):
@@ -1640,6 +2094,11 @@ BOT_COMMANDS = [
     ("xtimeline", "🐦 X profile video တွေ"),
     ("drivestatus", "☁️ Google Drive status"),
     ("stats", "📊 download stats"),
+    ("history", "🕘 ဒေါင်းခဲ့တာတွေ ပြန်ပို့"),
+    ("info", "ℹ️ link info ကြိုကြည့်"),
+    ("bookmark", "🔖 link သိမ်း"),
+    ("bookmarks", "🔖 သိမ်းထားတာတွေ"),
+    ("quota", "📊 ကိုယ့် quota ကြည့်"),
     ("ytcheck", "▶️ YouTube စစ်"),
     ("help", "📖 အကူအညီ"),
 ]
@@ -1679,6 +2138,8 @@ def _menu_kb(uid: int) -> InlineKeyboardMarkup:
                               callback_data="menu:night")],
         [InlineKeyboardButton("☁️ Drive", callback_data="menu:drive"),
          InlineKeyboardButton("📖 Help", callback_data="menu:help")],
+        [InlineKeyboardButton("🕘 History", callback_data="menu:history"),
+         InlineKeyboardButton("🔖 Bookmarks", callback_data="menu:bookmarks")],
     ]
     if uid == OWNER_ID:
         rows.append([InlineKeyboardButton("👑 Admin", callback_data="menu:admin")])
@@ -1704,8 +2165,42 @@ def _follows_text(uid: int) -> str:
     lines = []
     for v in fl.values():
         src = "🔍 TV" if v.get("kind") == "eztv" else "📡 RSS"
-        lines.append(f"• {v['name']} [{src}]")
+        mode = "🔔 notify" if v.get("mode", "auto") == "notify" else "⬇️ auto"
+        lines.append(f"• {v['name']} [{src}] — {mode}")
     return "📡 **Follow list:**\n" + "\n".join(lines)
+
+
+def _follows_kb(uid: int):
+    kb = []
+    for fid, v in follows.list(uid).items():
+        icon = "🔔" if v.get("mode", "auto") == "notify" else "⬇️"
+        kb.append([InlineKeyboardButton(
+            f"{icon} {v['name'][:38]}", callback_data=f"fl:mode:{fid}")])
+    return InlineKeyboardMarkup(kb) if kb else None
+
+
+async def fl_mode_pick(q, fid: str):
+    """Toggle follow between auto-download and notify-only."""
+    uid = q.from_user.id
+    v = follows.list(uid).get(fid)
+    if not v:
+        try:
+            await q.answer("မရှိတော့ပါ", show_alert=True)
+        except Exception:
+            pass
+        return
+    new = "notify" if v.get("mode", "auto") == "auto" else "auto"
+    follows.set_mode(uid, fid, new)
+    try:
+        await q.edit_message_text(
+            _follows_text(uid) + "\n\n_ခလုတ်နှိပ်ပြီး ⬇️ auto-download ↔ 🔔 notify-only ပြောင်းပါ_",
+            parse_mode="Markdown", reply_markup=_follows_kb(uid))
+    except Exception:
+        pass
+    try:
+        await q.answer("🔔 notify-only" if new == "notify" else "⬇️ auto-download")
+    except Exception:
+        pass
 
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1759,8 +2254,36 @@ async def menu_cb(q, action: str):
                 "ဥပမာ: `/subs dune part two`",
                 reply_markup=_BACK_KB, parse_mode="Markdown")
         elif action == "follows":
-            await q.edit_message_text(_follows_text(uid), reply_markup=_BACK_KB,
-                                      parse_mode="Markdown")
+            fkb = _follows_kb(uid)
+            rows = fkb.inline_keyboard if fkb else []
+            rows.append([InlineKeyboardButton("« 🎛️ Menu",
+                                              callback_data="menu:main")])
+            await q.edit_message_text(
+                _follows_text(uid) + "\n\n_ခလုတ်နှိပ်ပြီး ⬇️ auto ↔ 🔔 notify ပြောင်းပါ_",
+                reply_markup=InlineKeyboardMarkup(rows),
+                parse_mode="Markdown")
+        elif action == "history":
+            text, hkb = _history_view(uid)
+            rows = hkb.inline_keyboard if hkb else []
+            rows.append([InlineKeyboardButton("« 🎛️ Menu",
+                                              callback_data="menu:main")])
+            await q.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(rows),
+                parse_mode="Markdown", disable_web_page_preview=True)
+        elif action == "bookmarks":
+            items = bookmarks.list(uid)
+            if not items:
+                await q.edit_message_text("🔖 Bookmark မရှိသေးပါ — /bookmark <link> နဲ့ သိမ်းပါ.",
+                                          reply_markup=_BACK_KB)
+            else:
+                bkb = _bookmarks_kb(items)
+                rows = bkb.inline_keyboard if bkb else []
+                rows.append([InlineKeyboardButton("« 🎛️ Menu",
+                                                  callback_data="menu:main")])
+                await q.edit_message_text(
+                    _bookmarks_text(items),
+                    reply_markup=InlineKeyboardMarkup(rows),
+                    parse_mode="Markdown", disable_web_page_preview=True)
         elif action == "stats":
             await q.edit_message_text(_stats_text(), reply_markup=_BACK_KB,
                                       parse_mode="Markdown")
@@ -1808,6 +2331,23 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             fresh = new_items(f, items)
             if not fresh:
+                continue
+            ok_q, _, _ = quota_allows(uid)
+            if not ok_q and f.get("mode", "auto") != "notify":
+                print(f"📡 follow skipped (quota) -> {uid}")
+                continue
+            if f.get("mode", "auto") == "notify":
+                # 🔔 episode အသစ်အကြောင်းပဲ ကြားပေးမယ်, download မလုပ်ဘူး
+                for it in reversed(fresh):
+                    try:
+                        await context.bot.send_message(
+                            f["chat_id"],
+                            f"📡 {f['name']}\n🆕 {it['title']}\n"
+                            f"⬇️ ဒေါင်းချင်ရင် /search နဲ့ ရှာပါ")
+                    except Exception as e:
+                        print(f"📡 follow notify failed: {e}")
+                        break
+                    follows.mark_seen(uid, fid, it["guid"])
                 continue
             if kind == "eztv":
                 fresh = select_releases(fresh)  # episode တစ်ခုကို တစ်ဖိုင်ပဲ
@@ -1931,6 +2471,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = re.fullmatch(r"subs:([a-z0-9-]+)", q.data or "")
     if m:
         await subs_pick(q, m.group(1))
+        return
+    m = re.fullmatch(r"subl:(\d+)", q.data or "")
+    if m:
+        await subl_pick(q, int(m.group(1)))
+        return
+    m = re.fullmatch(r"bm:(dl|del):(\d+)", q.data or "")
+    if m:
+        await bm_pick(q, update, context, m.group(1), int(m.group(2)))
+        return
+    m = re.fullmatch(r"fl:mode:([A-Za-z0-9]+)", q.data or "")
+    if m:
+        await fl_mode_pick(q, m.group(1))
+        return
+    m = re.fullmatch(r"hist:(\d+)", q.data or "")
+    if m:
+        await hist_pick(q, update, context, int(m.group(1)))
         return
     m = re.fullmatch(r"drive:(up|no):([0-9a-f]+)", q.data or "")
     if m:
@@ -2274,7 +2830,8 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
 
 async def deliver(uid: int, chat_id: int, path: str, caption: str,
                   kind: str, as_audio: bool, as_video: bool, log_kind: str = "tg",
-                  cache_key: str | None = None):
+                  cache_key: str | None = None,
+                  src_url: str | None = None):
     """Bot ကနေ ပို့ + Saved Messages (optional) + stats.
 
     cache_key ပေးရင် ပို့ပြီးရင် Telegram file_id ကို fileid cache မှာ
@@ -2338,7 +2895,8 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
         except Exception as e:
             print(f"⚠️ Saved Messages ပို့မရပါ: {e}")
     try:
-        stats.log(os.path.getsize(path) / 1048576, log_kind, uid)
+        stats.log(os.path.getsize(path) / 1048576, log_kind, uid,
+                  url=src_url, ckey=cache_key)
     except Exception:
         pass
 
@@ -2535,6 +3093,11 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                     f2 = asyncio.run_coroutine_threadsafe(fut, loop)
                     f2.add_done_callback(_swallow)
 
+            ok_q, used_q, quota_q = quota_allows(uid)
+            if not ok_q:
+                await _send_with_retry(status.edit_text,
+                                       quota_block_msg(used_q, quota_q))
+                return False
             idxs = ",".join(t["index"] for t, _ in pending)
             total = sum(t["size"] for t, _ in pending)
             paths = await asyncio.to_thread(
@@ -2566,7 +3129,8 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                     + (f" ({i}/{len(pending)})..." if multi else "..."))
                 await deliver(uid, chat_id, final, caption, kind, as_audio,
                               kind == "video", log_kind="torrent",
-                              cache_key=ck)
+                              cache_key=ck,
+                              src_url=source if is_magnet_src else None)
                 ok += 1
             if ok:
                 await status.delete()
@@ -2782,6 +3346,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                     ok += 1
                                     print(f"⚡ tg cache hit -> {uid}")
                                     continue
+                            ok_q, used_q, quota_q = quota_allows(uid)
+                            if not ok_q:
+                                await emsg.reply_text(
+                                    f"❌ {tag} " + quota_block_msg(used_q, quota_q))
+                                fail += 1
+                                continue
                             path = await download_tg_media(
                                 wmsg, os.path.join(tmpdir, original_filename(wmsg, wk, wtag)),
                                 make_tg_progress(status, tag, loop))
@@ -2831,6 +3401,12 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             ok += 1
                             print(f"⚡ web cache hit ({idx}/{n}) -> {uid}")
                             continue
+                    ok_q, used_q, quota_q = quota_allows(uid)
+                    if not ok_q:
+                        await emsg.reply_text(
+                            f"❌ {tag} " + quota_block_msg(used_q, quota_q))
+                        fail += 1
+                        continue
                     if looks_like_direct_file(url):
                         path, title = await download_direct_file(
                             url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
@@ -2856,7 +3432,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
                         await deliver(uid, chat_id, final, title, wk, as_audio,
                                       wk == "video", log_kind="web",
-                                      cache_key=cache_ckey)
+                                      cache_key=cache_ckey, src_url=url)
                     ok += 1
                     print(f"✅ web ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
             except Exception as e:
@@ -2945,6 +3521,10 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
     """5 မိနစ်တစ်ခါ: watch လုပ်ထားတဲ့ channel တွေမှာ post အသစ် စစ်မယ်."""
     for uid, chats in watches.all().items():
         if not allowed_uid(uid):
+            continue
+        ok_q, _, _ = quota_allows(uid)
+        if not ok_q:
+            print(f"👁️ watch skipped (quota) -> {uid}")
             continue
         for cid, w in chats.items():
             try:
@@ -3040,6 +3620,11 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
         if s["night"] and s["night_hour"] != kst_hour:
             remaining.extend(ulist)  # အချိန်မကျသေးဘူး — ဆက်စောင့်
             continue
+        ok_q, _, _ = quota_allows(uid)
+        if not ok_q:
+            remaining.extend(ulist)  # quota ပြည့်နေတယ် — နောက်မှ
+            print(f"🌙 night queue skipped (quota) -> {uid}")
+            continue
         print(f"🌙 night queue processing for {uid}: {len(ulist)} items")
         with tempfile.TemporaryDirectory() as tmpdir:
             for it in ulist:
@@ -3089,7 +3674,7 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             path, wk, uid, tmpdir, 0, use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, title,
                                       wk, as_audio, wk == "video", log_kind="web",
-                                      cache_key=n_ckey)
+                                      cache_key=n_ckey, src_url=url)
                     try:
                         await bot_client.send_message(
                             it["chat_id"], f"🌙 ညဘက် download ပြီးပါပြီ: {it.get('label','')}")
@@ -3137,6 +3722,12 @@ def main():
         ("nightmode", nightmode_cmd), ("stats", stats_cmd),
         ("adduser", adduser_cmd), ("deluser", deluser_cmd), ("users", users_cmd),
         ("extend", extend_cmd), ("admin", admin_cmd),
+        ("quota", quota_cmd),
+        ("history", history_cmd),
+        ("info", info_cmd),
+        ("bookmark", bookmark_cmd),
+        ("bookmarks", bookmarks_cmd),
+        ("unbookmark", unbookmark_cmd),
         ("trim", trim_cmd), ("find", find_cmd), ("join", join_cmd),
         ("xtimeline", xtimeline_cmd), ("clearcache", clearcache_cmd),
         ("ytcheck", ytcheck_cmd),

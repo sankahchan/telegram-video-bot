@@ -34,6 +34,7 @@ class FollowStore:
             "chat_id": chat_id,
             "seen": dict(seen),
             "added": int(time.time()),
+            "mode": "auto",
         }
         _save(self.FILE, d)
         return fid
@@ -52,6 +53,7 @@ class FollowStore:
             "chat_id": chat_id,
             "seen": dict(seen),
             "added": int(time.time()),
+            "mode": "auto",
         }
         _save(self.FILE, d)
         return fid
@@ -74,6 +76,18 @@ class FollowStore:
 
     def list(self, user_id: int):
         return self._data().get(str(user_id), {})
+
+    def set_mode(self, user_id: int, fid: str, mode: str) -> bool:
+        """mode: 'auto' (download) | 'notify' (message only)."""
+        if mode not in ("auto", "notify"):
+            return False
+        d = self._data()
+        u = d.get(str(user_id), {})
+        if fid not in u:
+            return False
+        u[fid]["mode"] = mode
+        _save(self.FILE, d)
+        return True
 
     def all(self):
         out = {}

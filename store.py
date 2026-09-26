@@ -37,11 +37,28 @@ class StatsStore:
 
     FILE = "stats.json"
 
-    def log(self, mb: float, kind: str, user_id: int) -> None:
+    def log(self, mb: float, kind: str, user_id: int,
+            url: str = None, ckey: str = None) -> None:
         items = _load(self.FILE, [])
-        items.append({"ts": time.time(), "mb": round(mb, 2), "kind": kind, "user": user_id})
+        items.append({"ts": time.time(), "mb": round(mb, 2), "kind": kind,
+                      "user": user_id, "url": url, "ckey": ckey})
         # keep last 5000 entries
         _save(self.FILE, items[-5000:])
+
+    def usage(self, user_id: int, days: int = 30) -> float:
+        """MB downloaded by user in the last `days` days (rolling)."""
+        cutoff = time.time() - days * 86400
+        total = 0.0
+        for it in _load(self.FILE, []):
+            if it.get("user") == user_id and it.get("ts", 0) >= cutoff:
+                total += it.get("mb", 0) or 0
+        return round(total, 1)
+
+    def recent(self, user_id: int, n: int = 10) -> list:
+        """Newest-first download history entries for a user."""
+        items = [it for it in _load(self.FILE, [])
+                 if it.get("user") == user_id]
+        return items[-n:][::-1]
 
     def summary(self):
         now = time.time()
@@ -72,8 +89,9 @@ class UserStore:
     users.json: {"allowed": [ids],
                  "meta": {uid_str: {"added": ts, "expires": ts|null,
                                     "name": str, "warned3": bool,
-                                    "warned_exp": bool}}}
+                                    "warned_exp": bool, "quota_mb": float|null}}}
     expires=None -> unlimited. 1 month = 30 days.
+    quota_mb=None -> unlimited monthly download quota (rolling 30 days).
     """
 
     FILE = "users.json"
@@ -87,7 +105,7 @@ class UserStore:
         for uid in d["allowed"]:
             d["meta"].setdefault(str(uid), {
                 "added": now, "expires": None, "name": "",
-                "warned3": False, "warned_exp": False,
+                "warned3": False, "warned_exp": False, "quota_mb": None,
             })
         return d
 
@@ -171,6 +189,54 @@ class UserStore:
                         "expires": m.get("expires"),
                         "name": m.get("name", "")})
         return out
+
+    def set_quota(self, uid: int, mb: float | None) -> bool:
+        """Monthly download quota in MB (None = unlimited)."""
+        d = self._data()
+        if uid not in d["allowed"]:
+            return False
+        d["meta"][str(uid)]["quota_mb"] = mb
+        self._save_data(d)
+        return True
+
+    def quota_mb(self, uid: int):
+        """Quota in MB, or None for unlimited / not in list."""
+        return self.meta(uid).get("quota_mb")
+
+
+# -------------------------------------------------------------- bookmarks
+class BookmarkStore:
+    """Saved links per user: {uid_str: [{url, title, ts}]} (max 50/user)."""
+
+    FILE = "bookmarks.json"
+    MAX_PER_USER = 50
+
+    def _data(self):
+        return _load(self.FILE, {})
+
+    def add(self, uid: int, url: str, title: str = "") -> bool:
+        d = self._data()
+        items = d.setdefault(str(uid), [])
+        if any(b["url"] == url for b in items):
+            return False
+        items.append({"url": url, "title": title or url[:60],
+                      "ts": int(time.time())})
+        d[str(uid)] = items[-self.MAX_PER_USER:]
+        _save(self.FILE, d)
+        return True
+
+    def list(self, uid: int) -> list:
+        return self._data().get(str(uid), [])
+
+    def remove(self, uid: int, idx: int) -> bool:
+        d = self._data()
+        items = d.get(str(uid), [])
+        if 0 <= idx < len(items):
+            items.pop(idx)
+            d[str(uid)] = items
+            _save(self.FILE, d)
+            return True
+        return False
 
 
 # -------------------------------------------------------------- watchlist
