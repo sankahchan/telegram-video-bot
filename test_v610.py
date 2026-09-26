@@ -505,6 +505,14 @@ upd2 = types.SimpleNamespace(
 asyncio.run(bot.handle_document(upd2, None))
 check("non-torrent ignored", True)  # returned without error
 
+# --- 14. pending is list of dicts: no tuple-unpack anywhere ------------------
+src_all = open(os.path.join(REPO, "bot.py")).read()
+check("no 'for t, _ in pending' left", "for t, _ in pending" not in src_all)
+pend = [{"index": "1", "size": 100, "path": "/tmp/a.mkv"},
+        {"index": "2", "size": 200, "path": "/tmp/b.mp4"}]
+check("idxs expr", ",".join(t["index"] for t in pend) == "1,2")
+check("total expr", sum(t["size"] for t in pend) == 300)
+
 print(f"\nPASS: {len(PASS)} checks")
 for p in PASS:
     print(f"  ✓ {p}")

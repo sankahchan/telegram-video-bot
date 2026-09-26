@@ -3394,8 +3394,8 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 await _send_with_retry(status.edit_text,
                                        quota_block_msg(used_q, quota_q))
                 return False
-            idxs = ",".join(t["index"] for t, _ in pending)
-            total = sum(t["size"] for t, _ in pending)
+            idxs = ",".join(t["index"] for t in pending)
+            total = sum(t["size"] for t in pending)
             paths = await asyncio.to_thread(
                 download_torrent, aria_src, tmpdir, idxs, total, _prog)
             by_size, by_base = {}, {}
