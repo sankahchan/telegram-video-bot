@@ -179,4 +179,15 @@ check("fallback hooked on _is_youtube failure path",
 check("fallback result verified+normalized",
       "fallback file failed verify" in src)
 
+# --- 8. v6.3.1: bot-wall short-circuits to the fallback (not instant raise) ----
+check("botwall markers defined", "_BOTWALL_MARKERS" in src)
+check("_is_botwall_error helper defined", "def _is_botwall_error" in src)
+check("botwall breaks to fallback", "botwalled = True" in src)
+check("botwall flag breaks outer loop", "if result or botwalled:" in src)
+check("botwall error no longer in instant-raise path",
+      "if _is_youtube(url) and _is_botwall_error(e):" in src)
+# the old bug: bot-check error raised before the fallback block could run
+check("fallback block reachable after botwall",
+      src.index("botwalled = True") < src.index("youtube_fallback_url, url"))
+
 print(f"\nPASS: {len(PASS)} checks")

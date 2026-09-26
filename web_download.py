@@ -440,6 +440,18 @@ _RETRYABLE_YT = (
     "HTTP Error 429",
 )
 
+# YouTube bot-wall markers — no point retrying other yt-dlp clients, go
+# straight to the Cobalt -> Piped -> Invidious fallback chain.
+_BOTWALL_MARKERS = (
+    "sign in to confirm you're not a bot",
+    "confirm you're not a bot",
+)
+
+
+def _is_botwall_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return any(m in s for m in _BOTWALL_MARKERS)
+
 
 def _retryable_yt_error(e: Exception) -> bool:
     s = str(e).lower()
@@ -766,6 +778,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     result = None
     last_err: Exception | None = None
     corrupt_n = 0
+    botwalled = False  # v6.3.1: YouTube bot-wall -> skip client retries, go fallback
     for ci, clients in enumerate(client_variants):
         for i, fmt in enumerate(fmts):
             try:
@@ -801,6 +814,10 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                 continue
             except Exception as e:
                 last_err = e
+                if _is_youtube(url) and _is_botwall_error(e):
+                    botwalled = True
+                    print(f"⛔ [{clients}] YouTube bot-wall — fallback chain ဆက်မယ်")
+                    break
                 if not _retryable_yt_error(e):
                     raise
                 if i < len(fmts) - 1:
@@ -809,7 +826,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                 if ci < len(client_variants) - 1:
                     print(f"⚠️ [{clients}] fail — client {client_variants[ci+1]} retry")
                 break
-        if result:
+        if result or botwalled:
             break
     if not result:
         # X: cascade taxonomy is authoritative for not_found/private/
