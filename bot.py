@@ -189,6 +189,7 @@ WELCOME = (
     "/follow <rss-url> [name] — series episode အသစ် auto-download\n"
     "/unfollow /follows\n"
     "/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ်\n"
+    "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး (အလွယ်ဆုံး)\n"
     "/search <text> — torrent အကုန် ရှာ (movie/music/series/software)\n"
     "/drivestatus — Google Drive upload status\n"
     "/nightmode [on|off] [နာရီ] — file ကြီးတွေ ညဘက်ဒေါင်း\n"
@@ -219,6 +220,7 @@ HELP_OVERVIEW = (
     "/follow — series RSS, episode အသစ် auto-download\n"
     "/unfollow /follows\n"
     "/tv — bot ထဲကနေ series ရှာ + follow (website မလို)\n"
+    "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး\n"
     "/search — torrent အကုန် ရှာ + ဒေါင်း\n"
     "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
@@ -370,6 +372,11 @@ HELP_TOPICS = {
         "• website သွားစရာမလို — bot ထဲမှာပဲ ရှာပြီး ရွေးရုံ\n"
         "• ရွေးပြီးရင် episode အသစ်ထွက်တိုင်း auto-download (မိနစ် ၃၀ တစ်ခါစစ်)\n"
         "• episode တစ်ခုကို 1080p တစ်ဖိုင်ပဲ ဒေါင်းမယ်"
+    ),
+    "menu": (
+        "🎛️ /menu — ခလုတ်တွေနဲ့ သုံး\n\n"
+        "command တွေ ရိုက်စရာမလို — /menu နှိပ်ပြီး\n"
+        "ခလုတ်နှိပ်ရုံနဲ့ ရှာ / follow / setting ချိန်လို့ရတယ်."
     ),
     "search": (
         "🔎 /search — Torrent အကုန် ရှာပြီး ဒေါင်း\n\n"
@@ -859,12 +866,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     s = stats.summary()
-    await update.message.reply_text(
-        "📊 **Download Stats**\n\n"
-        f"📅 ဒီနေ့: {s['day'][0]} ခု, {s['day'][1]} MB\n"
-        f"🗓️ ဒီလ (ရက် ၃၀): {s['month'][0]} ခု, {s['month'][1]} MB\n"
-        f"♾️ စုစုပေါင်း: {s['all'][0]} ခု, {s['all'][1]} MB"
-    )
+    await update.message.reply_text(_stats_text())
 
 
 async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1239,14 +1241,10 @@ async def follows_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fl = follows.list(uid)
     if not fl:
         await update.message.reply_text(
-            "📡 Follow လုပ်ထားတာ မရှိသေးပါ.\n/follow <rss-url> [name] နဲ့ ထည့်ပါ.")
+            "📡 Follow လုပ်ထားတာ မရှိသေးပါ.\n"
+            "🔍 /tv <series> ဒါမှမဟုတ် /follow <rss-url> နဲ့ ထည့်ပါ.")
         return
-    lines = []
-    for v in fl.values():
-        src = "🔍 TV" if v.get("kind") == "eztv" else "📡 RSS"
-        url = v.get("rss_url") or f"EZTV ({v.get('imdb_id')})"
-        lines.append(f"• {v['name']} [{src}]\n  {url}")
-    await update.message.reply_text("📡 **Follow list:**\n" + "\n".join(lines))
+    await update.message.reply_text(_follows_text(uid))
 
 
 # ------------------------------------------------- in-bot series search (/tv)
@@ -1372,6 +1370,156 @@ async def dl_pick(q, info_hash: str):
     except Exception:
         msg = q.message
     await run_torrent(msg, uid, q.message.chat_id, magnet, True, status=msg)
+
+
+# ---------------------------------------------------------------- menu (UI/UX)
+BOT_COMMANDS = [
+    ("menu", "🎛️ Menu — ခလုတ်တွေနဲ့ သုံး"),
+    ("search", "🔎 Torrent ရှာ (movie/music/series)"),
+    ("tv", "🔍 Series ရှာပြီး follow"),
+    ("follow", "📡 Series RSS follow"),
+    ("follows", "📡 Follow list ကြည့်"),
+    ("unfollow", "🚫 Follow ဖြုတ်"),
+    ("mode", "🎬 video/file ပို့ပုံစံ"),
+    ("quality", "🎞️ high/low quality"),
+    ("mp3", "🎵 MP3 ထုတ် on/off"),
+    ("zip", "📦 ZIP ပေါင်း on/off"),
+    ("save", "💾 Saved Messages auto-save"),
+    ("nightmode", "🌙 ညဘက် ဒေါင်း"),
+    ("trim", "✂️ video အပိုင်းဖြတ်"),
+    ("find", "🔍 channel ထဲ media ရှာ"),
+    ("watch", "👁️ channel post အသစ် auto-download"),
+    ("watchlist", "👁️ watch list"),
+    ("unwatch", "👁️ unwatch"),
+    ("xtimeline", "🐦 X profile video တွေ"),
+    ("drivestatus", "☁️ Google Drive status"),
+    ("stats", "📊 download stats"),
+    ("ytcheck", "▶️ YouTube စစ်"),
+    ("help", "📖 အကူအညီ"),
+]
+
+
+async def _set_bot_commands(app):
+    """'/' menu မှာ command list ပေါ်အောင် (BotFather သွားစရာမလို)."""
+    try:
+        from telegram import BotCommand
+        await app.bot.set_my_commands(
+            [BotCommand(c, d) for c, d in BOT_COMMANDS])
+        print("✅ bot command menu set")
+    except Exception as e:
+        print(f"⚠️ set_my_commands failed: {e}")
+
+
+def _menu_kb(uid: int) -> InlineKeyboardMarkup:
+    s = st(uid)
+    tg = lambda v: "🟢" if v else "⚪"  # noqa: E731
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔎 Torrent ရှာ", callback_data="menu:search"),
+         InlineKeyboardButton("🔍 Series follow", callback_data="menu:tv")],
+        [InlineKeyboardButton("📡 Follows", callback_data="menu:follows"),
+         InlineKeyboardButton("📊 Stats", callback_data="menu:stats")],
+        [InlineKeyboardButton(f"🎬 Mode: {s['mode']}",
+                              callback_data="menu:mode"),
+         InlineKeyboardButton(f"🎞️ Quality: {s['quality']}",
+                              callback_data="menu:quality")],
+        [InlineKeyboardButton(f"🎵 MP3 {tg(s['mp3'])}",
+                              callback_data="menu:mp3"),
+         InlineKeyboardButton(f"📦 ZIP {tg(s['zip'])}",
+                              callback_data="menu:zip")],
+        [InlineKeyboardButton(f"💾 Save {tg(s['save'])}",
+                              callback_data="menu:save"),
+         InlineKeyboardButton(f"🌙 Night {tg(s['night'])}",
+                              callback_data="menu:night")],
+        [InlineKeyboardButton("☁️ Drive", callback_data="menu:drive"),
+         InlineKeyboardButton("📖 Help", callback_data="menu:help")],
+    ])
+
+
+_BACK_KB = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("« 🎛️ Menu", callback_data="menu:main")]])
+
+
+def _stats_text() -> str:
+    s = stats.summary()
+    return ("📊 **Download Stats**\n\n"
+            f"📅 ဒီနေ့: {s['day'][0]} ခု, {s['day'][1]} MB\n"
+            f"🗓️ ရက် ၃၀: {s['month'][0]} ခု, {s['month'][1]} MB\n"
+            f"♾️ စုစုပေါင်း: {s['all'][0]} ခု, {s['all'][1]} MB")
+
+
+def _follows_text(uid: int) -> str:
+    fl = follows.list(uid)
+    if not fl:
+        return "📡 Follow လုပ်ထားတာ မရှိသေးပါ.\n🔍 Series follow ကနေ ထည့်ပါ."
+    lines = []
+    for v in fl.values():
+        src = "🔍 TV" if v.get("kind") == "eztv" else "📡 RSS"
+        lines.append(f"• {v['name']} [{src}]")
+    return "📡 **Follow list:**\n" + "\n".join(lines)
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/menu — ခလုတ်တွေနဲ့ သုံးတဲ့ menu."""
+    if not allowed(update):
+        return
+    await update.message.reply_text(
+        "🎛️ **Menu** — လိုတာနှိပ်:",
+        reply_markup=_menu_kb(update.effective_user.id),
+        parse_mode="Markdown")
+
+
+async def menu_cb(q, action: str):
+    """Menu inline buttons."""
+    uid = q.from_user.id
+    try:
+        if action == "main":
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+                                      reply_markup=_menu_kb(uid),
+                                      parse_mode="Markdown")
+        elif action == "mode":
+            settings.set(uid, "mode",
+                         "file" if st(uid)["mode"] == "video" else "video")
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+                                      reply_markup=_menu_kb(uid),
+                                      parse_mode="Markdown")
+        elif action == "quality":
+            settings.set(uid, "quality",
+                         "low" if st(uid)["quality"] == "high" else "high")
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+                                      reply_markup=_menu_kb(uid),
+                                      parse_mode="Markdown")
+        elif action in ("mp3", "zip", "save", "night"):
+            settings.set(uid, action, not st(uid)[action])
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+                                      reply_markup=_menu_kb(uid),
+                                      parse_mode="Markdown")
+        elif action == "search":
+            await q.edit_message_text(
+                "🔎 ရှာချင်တဲ့စာသား ပို့ပါ:\n`/search <text>`\n"
+                "ဥပမာ: `/search dune part 2 1080p`",
+                reply_markup=_BACK_KB, parse_mode="Markdown")
+        elif action == "tv":
+            await q.edit_message_text(
+                "🔍 Series နာမည် ပို့ပါ:\n`/tv <name>`\n"
+                "ဥပမာ: `/tv Lioness`\nရွေးပြီးရင် episode အသစ် auto-download.",
+                reply_markup=_BACK_KB, parse_mode="Markdown")
+        elif action == "follows":
+            await q.edit_message_text(_follows_text(uid), reply_markup=_BACK_KB,
+                                      parse_mode="Markdown")
+        elif action == "stats":
+            await q.edit_message_text(_stats_text(), reply_markup=_BACK_KB,
+                                      parse_mode="Markdown")
+        elif action == "drive":
+            ok = gdrive.is_configured()
+            await q.edit_message_text(
+                "☁️ Drive ချိတ်ပြီးပါပြီ ✅" if ok
+                else "☁️ Drive မချိတ်ရသေးပါ — `/drivestatus` မှာ setup ကြည့်.",
+                reply_markup=_BACK_KB, parse_mode="Markdown")
+        elif action == "help":
+            await q.edit_message_text(HELP_OVERVIEW, reply_markup=_BACK_KB,
+                                      parse_mode="Markdown")
+    except Exception:
+        pass
 
 
 def _fetch_bytes(url: str, timeout: int = 60) -> bytes:
@@ -1504,6 +1652,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     if not allowed(update):
+        return
+    m = re.fullmatch(r"menu:([a-z]+)", q.data or "")
+    if m:
+        await menu_cb(q, m.group(1))
         return
     m = re.fullmatch(r"tv:(\d+)", q.data or "")
     if m:
@@ -2631,6 +2783,7 @@ async def post_init(application: Application):
     await bot_client.start()
     me = await bot_client.get_me()
     print(f"✅ Bot @{me.username} အလုပ်လုပ်နေပါပြီ (HTTP polling)")
+    await _set_bot_commands(application)
     print("📋 Dialogs sync လုပ်နေပါတယ်...")
     try:
         async for _ in user.get_dialogs():
@@ -2666,11 +2819,12 @@ def main():
         ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
         ("tv", tv_cmd),
         ("search", search_cmd),
+        ("menu", menu_cmd),
         ("drivestatus", drivestatus_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
-        on_button, pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:).*"))
+        on_button, pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|menu:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
