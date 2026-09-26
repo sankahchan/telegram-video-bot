@@ -315,7 +315,9 @@ def _base_opts(outtmpl: str, fmt: str, player_clients=None, url=""):
     ck = _cookie_for(url)
     if ck:
         opts["cookiefile"] = ck
-    if YTDLP_PROXY:
+    # v6.4.3: paid proxy is YouTube-only — other sites download direct
+    # so proxy GB is not burned on TikTok/IG/X.
+    if YTDLP_PROXY and _is_youtube(url):
         opts["proxy"] = YTDLP_PROXY
     # NOTE: yt-dlp stops at the FIRST client that extracts without error,
     # even if it returns zero formats — so clients are retried one-by-one
@@ -383,7 +385,8 @@ def web_info(url: str) -> dict:
     ck = _cookie_for(url)
     if ck:
         opts["cookiefile"] = ck
-    if YTDLP_PROXY:
+    # v6.4.3: paid proxy is YouTube-only (see _base_opts).
+    if YTDLP_PROXY and _is_youtube(url):
         opts["proxy"] = YTDLP_PROXY
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -419,7 +422,8 @@ async def probe_size(url: str):
         ck = _cookie_for(url)
         if ck:
             opts["cookiefile"] = ck
-        if YTDLP_PROXY:
+        # v6.4.3: paid proxy is YouTube-only (see _base_opts).
+        if YTDLP_PROXY and _is_youtube(url):
             opts["proxy"] = YTDLP_PROXY
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)

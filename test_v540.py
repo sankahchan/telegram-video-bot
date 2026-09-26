@@ -185,9 +185,11 @@ try:
     opts2 = wd._base_opts("/tmp/o", "b", ["android"], "https://youtube.com/watch?v=1")
     check("pot absent in opts", "youtubepot-bgutilhttp" not in opts2.get("extractor_args", {}))
     wd.YTDLP_PROXY = "socks5://u:p@h:1"
-    opts3 = wd._base_opts("/tmp/o", "b", None, "https://tiktok.com/x")
-    check("proxy set", opts3.get("proxy") == "socks5://u:p@h:1")
-    check("player_skip yt-only", "youtube" not in opts3.get("extractor_args", {}))
+    opts3 = wd._base_opts("/tmp/o", "b", None, "https://youtube.com/watch?v=1")
+    check("proxy set (yt)", opts3.get("proxy") == "socks5://u:p@h:1")
+    opts4 = wd._base_opts("/tmp/o", "b", None, "https://tiktok.com/x")
+    check("proxy yt-only", "proxy" not in opts4)
+    check("player_skip yt-only", "youtube" not in opts4.get("extractor_args", {}))
     wd.YTDLP_PROXY = ""
     check("proxy unset", "proxy" not in wd._base_opts("/tmp/o", "b"))
     # TTL: fresh timestamp -> cached value kept, no re-probe
