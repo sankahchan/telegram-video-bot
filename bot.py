@@ -32,6 +32,7 @@ Env vars:
 import os
 import re
 import hashlib
+import shutil
 import mimetypes
 import asyncio
 import tempfile
@@ -61,6 +62,10 @@ from torrent_download import (  # noqa: E402
     torrent_files, pick_targets, download_torrent, check_torrent_size,
     TorrentError, MAX_TORRENT_FILE_MB,
 )
+from follow import (  # noqa: E402
+    FollowStore, fetch_items, new_items, is_torrent_link, MAX_ATTEMPTS,
+)
+import gdrive  # noqa: E402  (google libs imported lazily inside)
 
 from pyrogram import Client as PyroClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -116,11 +121,13 @@ watches = WatchStore()
 night_q = QueueStore()
 settings = SettingsStore()
 fcache = FileIdCache()  # URL -> Telegram file_id (instant repeat delivery)
+follows = FollowStore()  # torrent RSS auto-follow
 
 # In-memory pending states
 pending_trim = {}      # uid -> (start_sec, end_sec)
 pending_finds = {}     # uid -> [(chat_id, msg_id, label)]
 pending_quality = {}   # uid -> {"token", "text", "trim", "ts"} (quality prompt)
+pending_drive = {}     # token -> {"uid","chat_id","source","is_magnet","tname","size","tdata","ts"}
 
 
 # ---------------------------------------------------------------- auth
@@ -177,6 +184,9 @@ WELCOME = (
     "/find <channel> <စာသား> — channel ထဲ media ရှာ\n"
     "/watch <channel> — post အသစ် auto-download\n"
     "/unwatch /watchlist\n"
+    "/follow <rss-url> [name] — series episode အသစ် auto-download\n"
+    "/unfollow /follows\n"
+    "/drivestatus — Google Drive upload status\n"
     "/nightmode [on|off] [နာရီ] — file ကြီးတွေ ညဘက်ဒေါင်း\n"
     "/save [on|off] — Saved Messages ထဲ auto-save\n"
     "/stats — download stats\n"
@@ -202,13 +212,18 @@ HELP_OVERVIEW = (
     "/find — channel ထဲ media ရှာ\n"
     "/watch — post အသစ် auto-download\n"
     "/unwatch /watchlist\n"
+    "/follow — series RSS, episode အသစ် auto-download\n"
+    "/unfollow /follows\n"
+    "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
     "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
     "/xtimeline — X profile ရဲ့ latest video တွေ\n"
     "/clearcache — file_id cache ရှင်း (owner only)\n"
     "/ytcheck [url] — YouTube pipeline စစ် (owner only)\n"
-    "🧲 **Torrent** — magnet link ပို့ (သို့) .torrent file တင်"
+    "🧲 **Torrent** — magnet link ပို့ (သို့) .torrent file တင်\n"
+    "   • album/pack ဆို video/audio အားလုံး + subtitle (.srt) တွဲပို့\n"
+    "   • 2GB ကျော်တဲ့ file → ☁️ Google Drive တင်ဖို့ မေး (/drivestatus)"
 )
 
 HELP_TOPICS = {
@@ -316,6 +331,35 @@ HELP_TOPICS = {
         "📋 /watchlist — Watch လုပ်ထားတဲ့ channel များ ကြည့်\n\n"
         "အသုံးပြုပုံ / Usage:\n"
         "  /watchlist"
+    ),
+    "follow": (
+        "📡 /follow — Series episode အသစ် auto-download\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /follow <rss-url> [name]\n\n"
+        "ဥပမာ / Example:\n"
+        "  /follow https://showrss.info/show/123.rss \"My Series\"\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• မိနစ် ၃၀ တစ်ခါ feed စစ်မယ် — episode အသစ်တွေ့ရင် auto-download\n"
+        "• စထည့်တုန်း ရှိပြီးသား episode တွေကို ကျော်မယ် (အသစ်ပဲ ဒေါင်းမယ်)\n"
+        "• seeders မရှိသေးရင် ၃ ခါအထိ ပြန်စမ်းမယ်"
+    ),
+    "unfollow": (
+        "🚫 /unfollow — Follow ဖြုတ်\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /unfollow <name>  — တစ်ခု ဖြုတ်\n"
+        "  /unfollow all     — အားလုံး ဖြုတ်"
+    ),
+    "follows": (
+        "📡 /follows — Follow လုပ်ထားတဲ့ series များ ကြည့်\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /follows"
+    ),
+    "drivestatus": (
+        "☁️ /drivestatus — Google Drive upload status\n\n"
+        "2GB ကျော်တဲ့ torrent file တွေ Telegram ပို့မရတဲ့အခါ\n"
+        "Drive ထဲ တင်ပေးဖို့ ဒါ ချိတ်ထားရမယ်.\n\n"
+        "Setup လုပ်ပုံ /help drivestatus အစား ဒီ command ကိုပဲ\n"
+        "run ကြည့် — အဆင့်ဆင့် ပြပေးမယ်."
     ),
     "stats": (
         "📊 /stats — Download stats\n\n"
@@ -1101,6 +1145,168 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👁️ **Watch list:**\n" + "\n".join(lines))
 
 
+# ---------------------------------------------------------------- series auto-follow (torrent RSS)
+async def follow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/follow <rss-url> [name] — episode အသစ်ထွက်တိုင်း auto-download."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /follow <rss-url> [name]\n"
+            "ဥပမာ: /follow https://showrss.info/show/123.rss \"My Series\"\n"
+            "episode အသစ်ထွက်တိုင်း bot က auto-download လုပ်ပေးမယ်.")
+        return
+    rss_url = args[0]
+    name = " ".join(args[1:]).strip()
+    status = await update.message.reply_text("📡 feed စစ်နေပါတယ်...")
+    try:
+        items = await asyncio.to_thread(fetch_items, rss_url)
+    except Exception as e:
+        await status.edit_text(f"❌ feed ဖတ်မရပါ: {e}")
+        return
+    if not items:
+        await status.edit_text("❌ feed ထဲမှာ item မရှိပါ.")
+        return
+    seen = {it["guid"]: MAX_ATTEMPTS for it in items}  # လက်ရှိတွေကို ကျော်
+    fid = follows.add(uid, rss_url, name or items[0]["title"][:50],
+                      update.effective_chat.id, seen)
+    await status.edit_text(
+        f"✅ follow လုပ်ပြီးပါပြီ: **{name or items[0]['title'][:50]}**\n"
+        f"📡 {rss_url}\n🆕 episode အသစ်ထွက်ရင် auto-download လုပ်ပေးမယ်.")
+
+
+async def unfollow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/unfollow <name|id|all>."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("အသုံးပြုပုံ: /unfollow <name>  သို့မဟုတ်  /unfollow all")
+        return
+    if args[0].lower() == "all":
+        n = follows.remove_all(uid)
+        await update.message.reply_text(f"🚫 follow {n} ခု ဖြုတ်ပြီးပါပြီ.")
+        return
+    key = " ".join(args).lower()
+    fl = follows.list(uid)
+    fid = None
+    for k, v in fl.items():
+        if k.startswith(key) or key in v.get("name", "").lower():
+            fid = k
+            break
+    if fid and follows.remove(uid, fid):
+        await update.message.reply_text("🚫 follow ဖြုတ်ပြီးပါပြီ.")
+    else:
+        await update.message.reply_text("ℹ️ ဒီ follow မရှိပါ — /follows နဲ့ ကြည့်ပါ.")
+
+
+async def follows_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/follows — follow list."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    fl = follows.list(uid)
+    if not fl:
+        await update.message.reply_text(
+            "📡 Follow လုပ်ထားတာ မရှိသေးပါ.\n/follow <rss-url> [name] နဲ့ ထည့်ပါ.")
+        return
+    lines = [f"• {v['name']}\n  {v['rss_url']}" for v in fl.values()]
+    await update.message.reply_text("📡 **Follow list:**\n" + "\n".join(lines))
+
+
+def _fetch_bytes(url: str, timeout: int = 60) -> bytes:
+    import httpx
+    r = httpx.get(url, timeout=timeout, follow_redirects=True,
+                  headers={"User-Agent": "tg-video-bot/1.0"})
+    r.raise_for_status()
+    return r.content
+
+
+async def follow_job(context: ContextTypes.DEFAULT_TYPE):
+    """30 မိနစ်တစ်ခါ: follow လုပ်ထားတဲ့ RSS feed တွေမှာ episode အသစ် စစ်မယ်."""
+    for uid, feeds in follows.all().items():
+        if not allowed_uid(uid):
+            continue
+        for fid, f in feeds.items():
+            try:
+                items = await asyncio.to_thread(fetch_items, f["rss_url"])
+            except Exception as e:
+                print(f"📡 follow poll failed {f['rss_url']}: {e}")
+                continue
+            fresh = new_items(f, items)
+            if not fresh:
+                continue
+            for it in reversed(fresh):  # အဟောင်းကနေ အသစ်ဆီ
+                link = it["link"]
+                if not is_torrent_link(link):
+                    follows.mark_seen(uid, fid, it["guid"])
+                    continue
+                try:
+                    msg = await context.bot.send_message(
+                        f["chat_id"],
+                        f"📡 **{f['name']}**\n🆕 {it['title']}")
+                except Exception as e:
+                    print(f"📡 follow send failed: {e}")
+                    break
+                try:
+                    if link.startswith("magnet:"):
+                        ok = await run_torrent(msg, uid, f["chat_id"], link,
+                                               True, status=msg)
+                    else:
+                        tbytes = await asyncio.to_thread(_fetch_bytes, link)
+                        tpath = os.path.join(
+                            tempfile.mkdtemp(), "follow.torrent")
+                        with open(tpath, "wb") as fh:
+                            fh.write(tbytes)
+                        try:
+                            ok = await run_torrent(
+                                msg, uid, f["chat_id"], tpath, False,
+                                src_id="url:" + hashlib.sha1(
+                                    link.encode()).hexdigest(),
+                                tdata=tbytes, status=msg)
+                        finally:
+                            try:
+                                os.unlink(tpath)
+                            except OSError:
+                                pass
+                except Exception as e:
+                    traceback.print_exc()
+                    ok = False
+                if ok:
+                    follows.mark_seen(uid, fid, it["guid"])
+                else:
+                    follows.bump_attempt(uid, fid, it["guid"])
+
+
+async def drivestatus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/drivestatus — Google Drive upload status / setup guide."""
+    if not allowed(update):
+        return
+    if not gdrive.is_configured():
+        await update.message.reply_text(
+            "☁️ Google Drive မချိတ်ရသေးပါ.\n\n"
+            "**Setup (Mac မှာ တစ်ခါလုပ်ရုံ):**\n"
+            "1. console.cloud.google.com → project အသစ် →\n"
+            "   \"Google Drive API\" enable\n"
+            "2. APIs & Services → Credentials →\n"
+            "   Create Credentials → OAuth client ID →\n"
+            "   Application type: **Desktop app** → JSON download\n"
+            "3. အဲဒီ JSON ကို `client_secret.json` နာမည်နဲ့\n"
+            "   bot folder (~/workspace/telegram-video-bot/) ထဲ ထား\n"
+            "4. `python3 gdrive_auth.py` run → browser ပွင့်မယ် → Approve\n"
+            "5. `scp token.json <vps>:/opt/tg-video-bot/`\n"
+            "   ပြီးရင် `sudo systemctl restart tg-video-bot`\n\n"
+            "ပြီးရင် 2GB ကျော်တဲ့ torrent file တွေ Drive ထဲ တင်ပေးမယ်.")
+        return
+    email = await asyncio.to_thread(gdrive.account_email)
+    await update.message.reply_text(
+        f"☁️ Drive ချိတ်ပြီးပါပြီ{f' ({email})' if email else ''}.\n"
+        "2GB ကျော်တဲ့ torrent file တွေ Drive ထဲ တင်ပေးနိုင်ပါပြီ.")
+
+
 # ---------------------------------------------------------------- quality prompt
 QUALITY_PROMPT_TTL = 600  # seconds
 
@@ -1134,6 +1340,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     if not allowed(update):
         return
+    m = re.fullmatch(r"drive:(up|no):([0-9a-f]+)", q.data or "")
+    if m:
+        await _drive_callback(q, m.group(1), m.group(2))
+        return
     m = re.fullmatch(r"q:(low|high):([0-9a-f]+)", q.data or "")
     if not m:
         return
@@ -1162,6 +1372,117 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     await handle_link(update, context, text=pend["text"], quality=choice, prompt=False)
+
+
+async def _drive_callback(q, action: str, token: str):
+    """☁️ Drive upload inline buttons: drive:up:<token> / drive:no:<token>."""
+    uid = q.from_user.id
+    pend = pending_drive.get(token)
+    if not pend or pend.get("uid") != uid:
+        try:
+            await q.edit_message_text("⏰ ဒီ ရွေးချယ်မှု မရှိတော့ပါ.")
+        except Exception:
+            pass
+        return
+    if time.time() - pend.get("ts", 0) > DRIVE_PENDING_TTL:
+        pending_drive.pop(token, None)
+        try:
+            await q.edit_message_text("⏰ သက်တမ်းကုန်သွားပါပြီ — link ပြန်ပို့ပေးပါ.")
+        except Exception:
+            pass
+        return
+    pending_drive.pop(token, None)
+    if action == "no":
+        try:
+            await q.edit_message_text("❌ မလုပ်တော့ပါ.")
+        except Exception:
+            pass
+        return
+    msg = q.message
+    tname, size_mb = pend["tname"], pend["size_mb"]
+    try:
+        await msg.edit_text(f"☁️ `{tname}` ({size_mb:.0f}MB)\n⬇️ ဒေါင်းနေပါတယ်...",
+                            parse_mode="Markdown")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loop = asyncio.get_running_loop()
+            if pend["is_magnet"]:
+                tpath = await asyncio.to_thread(
+                    fetch_magnet_metadata, pend["source"], tmpdir)
+                aria_src = tpath
+            else:
+                tpath = os.path.join(tmpdir, "drive.torrent")
+                with open(tpath, "wb") as f:
+                    f.write(pend["tdata"] or b"")
+                aria_src = tpath
+            files = await asyncio.to_thread(torrent_files, tpath)
+            target = max(files, key=lambda f: f["size"])
+            # VPS disk safety
+            free_mb = shutil.disk_usage(tmpdir).free / 1048576
+            if target["size"] / 1048576 > free_mb * 0.8:
+                await msg.edit_text(
+                    f"❌ VPS disk မလောက်ပါ ({free_mb:.0f}MB လွတ်).")
+                return
+            last = [0.0, -1]
+
+            def _prog(done: int, total: int):
+                pct = int(done / total * 100) if total else 0
+                now = time.time()
+                if pct != last[1] and now - last[0] >= 15:
+                    last[0], last[1] = now, pct
+                    fut = msg.edit_text(
+                        f"☁️ `{tname}`\n⬇️ {done/1048576:.0f}/{size_mb:.0f}MB ({pct}%)",
+                        parse_mode="Markdown")
+                    f2 = asyncio.run_coroutine_threadsafe(fut, loop)
+                    f2.add_done_callback(_swallow)
+
+            paths = await asyncio.to_thread(
+                download_torrent, aria_src, tmpdir, target["index"],
+                target["size"], _prog, 3 * 3600)
+            path = None
+            for p in paths:
+                try:
+                    if os.path.getsize(p) == target["size"]:
+                        path = p
+                        break
+                except OSError:
+                    pass
+            path = path or paths[0]
+            await msg.edit_text(f"☁️ `{tname}`\n📤 Drive တင်နေပါတယ်...",
+                                parse_mode="Markdown")
+            ulast = [0.0, -1]
+
+            def _uprog(done: int, total: int):
+                pct = int(done / total * 100) if total else 0
+                now = time.time()
+                if pct != ulast[1] and now - ulast[0] >= 15:
+                    ulast[0], ulast[1] = now, pct
+                    fut = msg.edit_text(
+                        f"☁️ `{tname}`\n📤 {pct}% တင်နေပါတယ်...",
+                        parse_mode="Markdown")
+                    f2 = asyncio.run_coroutine_threadsafe(fut, loop)
+                    f2.add_done_callback(_swallow)
+
+            res = await asyncio.to_thread(
+                gdrive.upload_file, path, tname, _uprog)
+            try:
+                stats.log(size_mb, "drive", uid)
+            except Exception:
+                pass
+            await msg.edit_text(
+                f"✅ Drive တင်ပြီးပါပြီ\n☁️ `{tname}` ({size_mb:.0f}MB)\n🔗 {res['link']}",
+                parse_mode="Markdown", disable_web_page_preview=True)
+    except TorrentError as e:
+        traceback.print_exc()
+        try:
+            await msg.edit_text(str(e))
+        except Exception:
+            pass
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            await msg.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- core flow
@@ -1484,21 +1805,64 @@ _TORRENT_AUDIO_EXTS = {
 }
 
 
+DRIVE_MAX_MB = 10240  # Drive upload: VPS disk safety cap per file
+DRIVE_PENDING_TTL = 3600
+
+
+async def _offer_drive(status, uid: int, chat_id: int, source: str,
+                       is_magnet_src: bool, tdata: bytes | None,
+                       tname: str, size_mb: float) -> bool:
+    """File too big for Telegram -> offer Google Drive upload via buttons."""
+    if not gdrive.is_configured():
+        await _send_with_retry(
+            status.edit_text,
+            f"❌ `{tname}` ({size_mb:.0f}MB) — Telegram limit (~2GB) ကျော်နေပါတယ်.\n"
+            "☁️ Drive upload မချိတ်ရသေးပါ — /drivestatus ကြည့်ပါ.")
+        return False
+    if size_mb > DRIVE_MAX_MB:
+        await _send_with_retry(
+            status.edit_text,
+            f"❌ `{tname}` ({size_mb:.0f}MB) — အရမ်းကြီးပါတယ် (Drive cap 10GB).")
+        return False
+    token = hashlib.sha256(f"{uid}:{time.time()}".encode()).hexdigest()[:12]
+    pending_drive[token] = {"uid": uid, "chat_id": chat_id, "source": source,
+                            "is_magnet": is_magnet_src, "tdata": tdata,
+                            "tname": tname, "size_mb": size_mb,
+                            "ts": time.time()}
+    kb = [[InlineKeyboardButton("☁️ Drive ထဲ တင်",
+                               callback_data=f"drive:up:{token}")],
+          [InlineKeyboardButton("❌ မလုပ်",
+                               callback_data=f"drive:no:{token}")]]
+    await _send_with_retry(
+        status.edit_text,
+        f"☁️ `{tname}` ({size_mb:.0f}MB) — Telegram (~2GB) ပို့မရပါ.\n"
+        "Google Drive ထဲ တင်ပေးရမလား?",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    return True
+
+
 async def run_torrent(emsg, uid: int, chat_id: int, source: str,
-                      is_magnet_src: bool, src_id: str | None = None):
+                      is_magnet_src: bool, src_id: str | None = None,
+                      tdata: bytes | None = None, status=None) -> bool:
     """Magnet / .torrent download flow: metadata -> pick files -> download
     -> post-process -> deliver. source = magnet link or .torrent file path.
     src_id: stable identity for per-file cache keys (magnet itself, or the
-    .torrent file's sha1)."""
+    .torrent file's sha1). tdata: raw .torrent bytes (for the Drive-upload
+    offer after the temp file is gone). status: pre-made status message
+    (background jobs) — skips the initial reply. Returns True on success."""
+    no_aria = ("❌ torrent engine (aria2c) မရှိသေးပါ — VPS မှာ run ပေးပါ:\n"
+               "bash /opt/tg-video-bot/update.sh")
     if not have_aria2():
-        await emsg.reply_text(
-            "❌ torrent engine (aria2c) မရှိသေးပါ — VPS မှာ run ပေးပါ:\n"
-            "bash /opt/tg-video-bot/update.sh")
-        return
+        if status is not None:
+            await _send_with_retry(status.edit_text, no_aria)
+        elif emsg is not None:
+            await emsg.reply_text(no_aria)
+        return False
     s = st(uid)
     sid = src_id or source
-    status = await _send_with_retry(
-        emsg.reply_text, "🧲 torrent ပြင်ဆင်နေပါတယ်...")
+    if status is None:
+        status = await _send_with_retry(
+            emsg.reply_text, "🧲 torrent ပြင်ဆင်နေပါတယ်...")
     with tempfile.TemporaryDirectory() as tmpdir:
         loop = asyncio.get_running_loop()
         try:
@@ -1513,9 +1877,16 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 tpath = source
                 aria_src = tpath
             files = await asyncio.to_thread(torrent_files, tpath)
-            targets = pick_targets(files)
             if len(files) == 1:
-                check_torrent_size(targets[0]["size"])
+                try:
+                    check_torrent_size(files[0]["size"])
+                except TorrentError:
+                    t1 = os.path.basename(files[0]["path"])
+                    await _offer_drive(status, uid, chat_id, source,
+                                       is_magnet_src, tdata, t1,
+                                       files[0]["size"] / 1048576)
+                    return False
+            targets = pick_targets(files)
             # per-file cache: hits are delivered instantly, misses download
             pending = []
             for t in targets:
@@ -1532,7 +1903,7 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 pending.append((t, ck))
             if not pending:
                 await status.delete()
-                return
+                return True
             total_mb = sum(t["size"] for t, _ in pending) / 1048576
             multi = len(targets) > 1
             if multi:
@@ -1598,13 +1969,16 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
             else:
                 await _send_with_retry(
                     status.edit_text, "❌ file တွေ ရှာမတွေ့ပါ.")
+            return ok > 0
         except TorrentError as e:
             traceback.print_exc()
             await _send_with_retry(status.edit_text, str(e))
+            return False
         except Exception as e:
             traceback.print_exc()
             await _send_with_retry(
                 status.edit_text, f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
+            return False
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -1954,8 +2328,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await download_tg_media(msg, tpath, None)
             await status.delete()
             with open(tpath, "rb") as f:
-                sid = "file:" + hashlib.sha1(f.read()).hexdigest()
-            await run_torrent(emsg, uid, chat_id, tpath, False, src_id=sid)
+                tdata = f.read()
+            sid = "file:" + hashlib.sha1(tdata).hexdigest()
+            await run_torrent(emsg, uid, chat_id, tpath, False, src_id=sid,
+                              tdata=tdata)
         except Exception as e:
             traceback.print_exc()
             await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
@@ -2114,6 +2490,8 @@ def main():
         ("xtimeline", xtimeline_cmd), ("clearcache", clearcache_cmd),
         ("ytcheck", ytcheck_cmd),
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
+        ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
+        ("drivestatus", drivestatus_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^q:(low|high):"))
@@ -2137,7 +2515,8 @@ def main():
     else:
         jq.run_repeating(watch_job, interval=300, first=90)
         jq.run_repeating(night_job, interval=3600, first=120)
-        print("⏰ background jobs: watch (5min), night queue (1h)")
+        jq.run_repeating(follow_job, interval=1800, first=180)
+        print("⏰ background jobs: watch (5min), night queue (1h), follow (30min)")
     print("📡 Polling စတင်နေပါပြီ...")
     app.run_polling()
 

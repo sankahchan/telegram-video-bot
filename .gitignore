@@ -24,3 +24,6 @@ venv/
 /cookies_instagram.txt
 /cookies_twitter.txt
 /fileid_cache.json
+/follows.json
+/token.json
+/client_secret.json

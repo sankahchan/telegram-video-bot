@@ -30,6 +30,8 @@ _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts",
                ".m4v", ".3gp", ".mpg", ".mpeg"}
 _AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac",
                ".alac", ".wma"}
+_SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".smi"}
+MAX_SUB_FILES = 5  # torrent ထဲက subtitle အများဆုံး ဒီအရေအတွက် တွဲပို့
 
 MAX_TORRENT_FILES = 20  # multi-file torrent: အများဆုံး ဒီအရေအတွက် ပို့
 
@@ -120,9 +122,17 @@ def pick_targets(files: list, max_files: int = MAX_TORRENT_FILES,
     Single file -> itself. Multi-file (album, season pack, ...) -> the
     video/audio files, largest-first, capped by count and total size so a
     huge pack can't blow the ~2GB Telegram limit or spam the chat.
+    Subtitle files (.srt/.ass/...) are always included too (up to
+    MAX_SUB_FILES) — they don't count toward the caps.
     """
     if not files:
         raise TorrentError("torrent ထဲမှာ file မရှိပါ.")
+
+    def _subs(pool_files):
+        subs = [f for f in pool_files
+                if os.path.splitext(f["path"])[1].lower() in _SUB_EXTS]
+        return subs[:MAX_SUB_FILES]
+
     if len(files) == 1:
         return [files[0]]
     media = [f for f in files
@@ -141,6 +151,10 @@ def pick_targets(files: list, max_files: int = MAX_TORRENT_FILES,
     if not picked:
         # the largest file alone already exceeds the Telegram cap
         check_torrent_size(pool[0]["size"])  # raises the friendly error
+    picked_set = {id(f) for f in picked}
+    for s in _subs(files):
+        if id(s) not in picked_set:
+            picked.append(s)
     return picked
 
 
