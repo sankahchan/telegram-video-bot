@@ -33,6 +33,7 @@ import os
 import re
 import hashlib
 import shutil
+import urllib.parse
 import mimetypes
 import asyncio
 import tempfile
@@ -2011,10 +2012,31 @@ def _search_format_tag(name: str) -> str:
     return ""
 
 
+_MAGNET_TRACKERS = [
+    "udp://tracker.openbittorrent.com:80/announce",
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://explodie.org:6969/announce",
+]
+
+
+def _with_trackers(magnet: str) -> str:
+    """Append public trackers to a bare magnet.
+
+    /search results only carry the info_hash, so the magnet has no tracker
+    list — aria2c then depends on DHT alone for metadata. Public trackers
+    give it a second peer-discovery path (harmless if already present).
+    """
+    if "tr=" in magnet:
+        return magnet
+    qs = "&".join("tr=" + urllib.parse.quote(t, safe="") for t in _MAGNET_TRACKERS)
+    return magnet + "&" + qs
+
+
 async def dl_pick(q, info_hash: str):
     """Inline button -> magnet တစ်ခု ဒေါင်း (ပုံမှန် torrent pipeline)."""
     uid = q.from_user.id
-    magnet = f"magnet:?xt=urn:btih:{info_hash}"
+    magnet = _with_trackers(f"magnet:?xt=urn:btih:{info_hash}")
     try:
         msg = await q.edit_message_text("🧲 torrent ဒေါင်းနေပါတယ်...")
     except Exception:
@@ -2071,7 +2093,7 @@ async def _maybe_ask_convert(status, s, pending, source):
 async def dlc_pick(q, info_hash: str, yes: bool):
     """Convert-prompt answer -> resume the torrent download with the choice."""
     uid = q.from_user.id
-    magnet = f"magnet:?xt=urn:btih:{info_hash}"
+    magnet = _with_trackers(f"magnet:?xt=urn:btih:{info_hash}")
     try:
         msg = await q.edit_message_text("🧲 torrent ဒေါင်းနေပါတယ်...")
     except Exception:

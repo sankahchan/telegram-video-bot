@@ -383,6 +383,12 @@ r2 = {"name": "Show.S01.1080p.AMZN.WEB-DL", "size": 734003200, "seeders": 5}
 lbl2 = bot._search_label(r2)
 check("no-tag label still shows size", lbl2.startswith("700MB") or "MB" in lbl2.split("·")[0])
 
+# --- 11. magnet trackers ---------------------------------------------------
+m0 = bot._with_trackers("magnet:?xt=urn:btih:" + "d" * 40)
+check("trackers appended", m0.count("tr=") == len(bot._MAGNET_TRACKERS))
+check("info_hash preserved", "d" * 40 in m0)
+check("no double-add", bot._with_trackers(m0 + "&tr=x") == m0 + "&tr=x")
+
 print(f"\nPASS: {len(PASS)} checks")
 for p in PASS:
     print(f"  ✓ {p}")
