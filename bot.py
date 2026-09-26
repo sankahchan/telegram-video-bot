@@ -47,7 +47,7 @@ from dotenv import load_dotenv
 load_dotenv()  # .env file ရှိရင် အဲဒီကနေ settings ဖတ်မယ်
 
 from fast_download import fast_download  # noqa: E402
-from store import StatsStore, UserStore, WatchStore, QueueStore, SettingsStore  # noqa: E402
+from store import StatsStore, UserStore, WatchStore, QueueStore, SettingsStore, BookmarkStore  # noqa: E402
 from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
     download_direct_file, looks_like_direct_file, direct_file_kind,
