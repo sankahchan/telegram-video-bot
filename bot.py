@@ -135,11 +135,36 @@ pending_drive = {}     # token -> {"uid","chat_id","source","is_magnet","tname",
 
 # ---------------------------------------------------------------- auth
 def allowed_uid(uid: int) -> bool:
-    return uid in ALLOWED_IDS or uid in user_store.allowed_ids()
+    if uid in ALLOWED_IDS:
+        return True
+    if uid not in user_store.allowed_ids():
+        return False
+    return not user_store.is_expired(uid)
+
+
+_expired_notice = {}  # uid -> day string (notify at most once/day)
 
 
 def allowed(update: Update) -> bool:
-    return bool(update.effective_user) and allowed_uid(update.effective_user.id)
+    u = update.effective_user
+    if not u:
+        return False
+    uid = u.id
+    if uid in ALLOWED_IDS or uid in user_store.allowed_ids():
+        if user_store.is_expired(uid):
+            day = time.strftime("%Y-%m-%d")
+            if _expired_notice.get(uid) != day:
+                _expired_notice[uid] = day
+                try:
+                    update.effective_message.reply_text(
+                        "⏰ **သက်တမ်း ကုန်သွားပါပြီ** / Subscription expired.\n"
+                        "ဆက်သုံးချင်ရင် owner ကို ဆက်သွယ်ပါ.",
+                        parse_mode="Markdown")
+                except Exception:
+                    pass
+            return False
+        return True
+    return False
 
 
 def is_owner(uid: int) -> bool:
@@ -198,6 +223,8 @@ WELCOME = (
     "/save [on|off] — Saved Messages ထဲ auto-save\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — (owner only)\n"
+    "/extend <id> <လ> — user သက်တမ်း တိုး (owner only)\n"
+    "/admin — 👑 admin panel (owner only)\n"
     "/xtimeline @user [n] — X profile ရဲ့ latest video တွေ\n"
     "/clearcache — file_id cache ရှင်း (owner only)\n\n"
     "📖 အသေးစိတ်: /help <command>  (ဥပမာ /help quality)\n\n"
@@ -228,6 +255,8 @@ HELP_OVERVIEW = (
     "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
+    "/extend <id> <months> — extend user subscription (owner only)\n"
+    "/admin — 👑 admin panel (owner only)\n"
     "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
     "/xtimeline — X profile ရဲ့ latest video တွေ\n"
     "/clearcache — file_id cache ရှင်း (owner only)\n"
@@ -418,10 +447,27 @@ HELP_TOPICS = {
     "adduser": (
         "➕ /adduser — User ထပ်ထည့် (owner only)\n\n"
         "အသုံးပြုပုံ / Usage:\n"
-        "  /adduser <Telegram ID>\n"
-        "  /adduser @username\n\n"
+        "  /adduser <Telegram ID> [လ]\n"
+        "  /adduser @username [လ]\n\n"
         "ဥပမာ / Example:\n"
-        "  /adduser 123456789"
+        "  /adduser 123456789 3  (= 3 လ)\n"
+        "  /adduser 123456789    (= ထာဝရ)\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• 1 လ = ရက် 30\n"
+        "• သက်တမ်း ကုန်ရင် bot သုံးမရတော့ပါ"
+    ),
+    "extend": (
+        "⏳ /extend — User သက်တမ်း တိုး (owner only)\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /extend <Telegram ID> <လ>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /extend 123456789 3\n\n"
+        "လက်ရှိ သက်တမ်း (သို့) အခုချိန်ကနေ လ ထပ်ပေါင်းမယ်."
+    ),
+    "admin": (
+        "👑 /admin — Admin panel (owner only)\n\n"
+        "User အရေအတွက်, သက်တမ်း status, download stats နဲ့\n"
+        "လိုအပ်တဲ့ command တွေ တစ်နေရာတည်း ကြည့်လို့ရမယ်."
     ),
     "deluser": (
         "➖ /deluser — User ဖြုတ် (owner only)\n\n"
@@ -433,7 +479,8 @@ HELP_TOPICS = {
     "users": (
         "👥 /users — သုံးခွင့်ရှိသူများ ကြည့် (owner only)\n\n"
         "အသုံးပြုပုံ / Usage:\n"
-        "  /users"
+        "  /users\n\n"
+        "တစ်ယောက်ချင်းစီရဲ့ သက်တမ်း (ကျန်တဲ့ ရက် / ကုန်ပြီ) ပြမယ်."
     ),
     "join": (
         "🔗 /join — VPS account ကို channel/group join ခိုင်း (owner only)\n\n"
@@ -888,26 +935,70 @@ async def adduser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
         return
     if not context.args:
-        await update.message.reply_text("အသုံးပြုပုံ: /adduser <Telegram ID သို့မဟုတ် @username>")
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /adduser <Telegram ID သို့မဟုတ် @username> [လ]\n"
+            "ဥပမာ: /adduser 123456789 3  (= 3 လ)\n"
+            "လ မထည့်ရင် ထာဝရ (unlimited).")
         return
     ref = context.args[0]
+    months = None
+    if len(context.args) > 1:
+        try:
+            months = float(context.args[1])
+            if months <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ လ အရေအတွက် မှားနေပါတယ် — ဥပမာ: /adduser 123456789 3")
+            return
     ids = re.findall(r"\d+", ref)
     if not ref.startswith("@") and not ids:
-        await update.message.reply_text("❌ ဂဏန်း Telegram ID ထည့်ပါ — ဥပမာ: /adduser 123456789")
+        await update.message.reply_text(
+            "❌ ဂဏန်း Telegram ID ထည့်ပါ — ဥပမာ: /adduser 123456789 3")
         return
     try:
         if ref.startswith("@"):
             u = await user.get_users(ref)
-            new_id = u.id
+            new_id, name = u.id, (u.username or u.first_name or "")
         else:
-            new_id = int(ids[0])
+            new_id, name = int(ids[0]), ""
     except Exception as e:
         await update.message.reply_text(f"❌ User ရှာမရပါ: {e}")
         return
-    if user_store.add(new_id):
-        await update.message.reply_text(f"✅ User {new_id} ကို ထည့်ပြီးပါပြီ.")
+    is_new = user_store.add(new_id, months=months, name=name)
+    exp_txt = (f" — {months:g} လ "
+               f"({time.strftime('%Y-%m-%d', time.localtime(user_store.expiry(new_id)))})"
+               if months else " — ထာဝရ")
+    if is_new:
+        await update.message.reply_text(f"✅ User {new_id} ကို ထည့်ပြီးပါပြီ{exp_txt}.")
     else:
-        await update.message.reply_text("ℹ️ ဒီ user ရှိပြီးသားပါ.")
+        await update.message.reply_text(f"ℹ️ ဒီ user ရှိပြီးသားပါ{exp_txt}.")
+
+
+async def extend_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: /extend <id> <လ> — သက်တမ်း တိုး."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
+        return
+    if len(context.args) < 2 or not re.findall(r"\d+", context.args[0]):
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /extend <Telegram ID> <လ>\nဥပမာ: /extend 123456789 3")
+        return
+    try:
+        months = float(context.args[1])
+        if months <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ လ အရေအတွက် မှားနေပါတယ်.")
+        return
+    ext_id = int(re.findall(r"\d+", context.args[0])[0])
+    new_exp = user_store.extend(ext_id, months)
+    if new_exp is None:
+        await update.message.reply_text("ℹ️ ဒီ user list ထဲမှာ မရှိပါ.")
+        return
+    await update.message.reply_text(
+        f"✅ User {ext_id} ကို {months:g} လ တိုးပြီးပါပြီ — "
+        f"သက်တမ်း: {time.strftime('%Y-%m-%d', time.localtime(new_exp))}")
 
 
 async def deluser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -925,13 +1016,67 @@ async def deluser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ ဒီ user list ထဲမှာ မရှိပါ.")
 
 
+def _user_line(u: dict) -> str:
+    uid = u["id"]
+    tag = " (owner)" if uid == OWNER_ID else ""
+    exp = u["expires"]
+    if uid == OWNER_ID or exp is None:
+        st_txt = "♾️ ထာဝရ"
+    else:
+        days = (exp - time.time()) / 86400
+        dstr = time.strftime("%Y-%m-%d", time.localtime(exp))
+        if days < 0:
+            st_txt = f"❌ ကုန်ပြီ ({dstr})"
+        elif days <= 7:
+            st_txt = f"⚠️ {days:.0f} ရက် ကျန် ({dstr})"
+        else:
+            st_txt = f"✅ {days:.0f} ရက် ကျန် ({dstr})"
+    name = f" @{u['name']}" if u.get("name") else ""
+    return f"• `{uid}`{name}{tag} — {st_txt}"
+
+
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
         return
-    ids = sorted(ALLOWED_IDS | user_store.allowed_ids())
-    lines = [f"• `{i}`" + (" (owner)" if i == OWNER_ID else "") for i in ids]
-    await update.message.reply_text("👥 **သုံးခွင့်ရှိသူများ:**\n" + "\n".join(lines))
+    users = [{"id": i, "added": None, "expires": None, "name": ""}
+             for i in sorted(ALLOWED_IDS)]
+    users += user_store.all_users()
+    await update.message.reply_text(
+        "👥 **သုံးခွင့်ရှိသူများ:**\n" + "\n".join(_user_line(u) for u in users),
+        parse_mode="Markdown")
+
+
+def _admin_text() -> str:
+    users = user_store.all_users()
+    n_total = len(users)
+    n_expired = sum(1 for u in users if user_store.is_expired(u["id"]))
+    n_soon = sum(1 for u in users
+                 if (d := user_store.days_left(u["id"])) is not None
+                 and 0 <= d <= 7)
+    s = stats.summary()
+    lines = [
+        "👑 **Admin Panel**",
+        f"👥 Users: {n_total} (✅ {n_total - n_expired - n_soon} active"
+        f"{f', ⚠️ {n_soon} expiring' if n_soon else ''}"
+        f"{f', ❌ {n_expired} expired' if n_expired else ''})",
+        f"📊 Downloads: today {s['day'][0]} ({s['day'][1]}MB) / "
+        f"30d {s['month'][0]} ({s['month'][1]}MB)",
+        "",
+        "**Commands:**",
+        "/adduser <id> [လ] — user ထည့် (ဥ: `/adduser 123 3`)",
+        "/extend <id> <လ> — သက်တမ်း တိုး",
+        "/deluser <id> — user ဖြုတ်",
+        "/users — user list အသေးစိတ်",
+    ]
+    return "\n".join(lines)
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Owner ပဲ ဒီ command သုံးလို့ရပါတယ်.")
+        return
+    await update.message.reply_text(_admin_text(), parse_mode="Markdown")
 
 
 async def join_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1514,7 +1659,7 @@ async def _set_bot_commands(app):
 def _menu_kb(uid: int) -> InlineKeyboardMarkup:
     s = st(uid)
     tg = lambda v: "🟢" if v else "⚪"  # noqa: E731
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("🔎 Torrent ရှာ", callback_data="menu:search"),
          InlineKeyboardButton("🔍 Series follow", callback_data="menu:tv"),
          InlineKeyboardButton("📝 Subs", callback_data="menu:subs")],
@@ -1534,7 +1679,10 @@ def _menu_kb(uid: int) -> InlineKeyboardMarkup:
                               callback_data="menu:night")],
         [InlineKeyboardButton("☁️ Drive", callback_data="menu:drive"),
          InlineKeyboardButton("📖 Help", callback_data="menu:help")],
-    ])
+    ]
+    if uid == OWNER_ID:
+        rows.append([InlineKeyboardButton("👑 Admin", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(rows)
 
 
 _BACK_KB = InlineKeyboardMarkup(
@@ -1625,6 +1773,10 @@ async def menu_cb(q, action: str):
         elif action == "help":
             await q.edit_message_text(HELP_OVERVIEW, reply_markup=_BACK_KB,
                                       parse_mode="Markdown")
+        elif action == "admin":
+            if uid == OWNER_ID:
+                await q.edit_message_text(_admin_text(), reply_markup=_BACK_KB,
+                                          parse_mode="Markdown")
     except Exception:
         pass
 
@@ -2824,6 +2976,51 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
                 print(f"⚠️ watch check failed {cid}: {type(e).__name__}: {e}")
 
 
+async def expiry_job(context: ContextTypes.DEFAULT_TYPE):
+    """24 နာရီတစ်ခါ: သက်တမ်း ကုန်တော့မယ့် (3 ရက်) / ကုန်သွားတဲ့ user တွေကို
+    notify + owner ကို report. warn flag တွေကြောင့် တစ်ယောက်ကို တစ်ခါပဲ ပို့မယ်."""
+    now = time.time()
+    expiring, expired = [], []
+    for u in user_store.all_users():
+        uid, exp = u["id"], u["expires"]
+        if not exp:
+            continue
+        m = user_store.meta(uid)
+        days = (exp - now) / 86400
+        if days <= 0:
+            if not m.get("warned_exp"):
+                expired.append(uid)
+                user_store.set_flag(uid, "warned_exp")
+        elif days <= 3 and not m.get("warned3"):
+            expiring.append((uid, days))
+            user_store.set_flag(uid, "warned3")
+    bot = context.bot
+    for uid, days in expiring:
+        try:
+            await bot.send_message(
+                uid, f"⚠️ သက်တမ်း {days:.0f} ရက် ကျန်ပါတော့တယ် / "
+                f"Your access expires in {days:.0f} days.\n"
+                "ဆက်သုံးချင်ရင် owner ကို ဆက်သွယ်ပါ.")
+        except Exception as e:
+            print(f"⚠️ expiry warn failed for {uid}: {e}")
+    for uid in expired:
+        try:
+            await bot.send_message(
+                uid, "⏰ သက်တမ်း ကုန်သွားပါပြီ / Subscription expired.\n"
+                "ဆက်သုံးချင်ရင် owner ကို ဆက်သွယ်ပါ.")
+        except Exception as e:
+            print(f"⚠️ expiry notice failed for {uid}: {e}")
+    if expiring or expired:
+        try:
+            await bot.send_message(
+                OWNER_ID, "👑 Expiry report:\n" + "\n".join(
+                    [f"⚠️ `{uid}`: {d:.0f} ရက် ကျန်" for uid, d in expiring] +
+                    [f"❌ `{uid}`: သက်တမ်း ကုန်ပြီ" for uid in expired]),
+                parse_mode="Markdown")
+        except Exception as e:
+            print(f"⚠️ expiry report failed: {e}")
+
+
 async def night_job(context: ContextTypes.DEFAULT_TYPE):
     """1 နာရီတစ်ခါ: night_hour (KST) ရောက်ရင် queue ထဲက file ကြီးတွေ ဒေါင်းမယ်.
 
@@ -2939,6 +3136,7 @@ def main():
         ("mp3", mp3_cmd), ("zip", zip_cmd), ("save", save_cmd),
         ("nightmode", nightmode_cmd), ("stats", stats_cmd),
         ("adduser", adduser_cmd), ("deluser", deluser_cmd), ("users", users_cmd),
+        ("extend", extend_cmd), ("admin", admin_cmd),
         ("trim", trim_cmd), ("find", find_cmd), ("join", join_cmd),
         ("xtimeline", xtimeline_cmd), ("clearcache", clearcache_cmd),
         ("ytcheck", ytcheck_cmd),
@@ -2975,7 +3173,8 @@ def main():
         jq.run_repeating(watch_job, interval=300, first=90)
         jq.run_repeating(night_job, interval=3600, first=120)
         jq.run_repeating(follow_job, interval=1800, first=180)
-        print("⏰ background jobs: watch (5min), night queue (1h), follow (30min)")
+        jq.run_repeating(expiry_job, interval=86400, first=120)
+        print("⏰ background jobs: watch (5min), night queue (1h), follow (30min), expiry (24h)")
     print("📡 Polling စတင်နေပါပြီ...")
     app.run_polling()
 

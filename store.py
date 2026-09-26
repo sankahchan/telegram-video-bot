@@ -67,33 +67,110 @@ class StatsStore:
 
 # ---------------------------------------------------------------- users
 class UserStore:
-    """Extra allowed user IDs (owner is defined by ALLOWED_USER_IDS env)."""
+    """Extra allowed user IDs with optional expiry (subscription).
+
+    users.json: {"allowed": [ids],
+                 "meta": {uid_str: {"added": ts, "expires": ts|null,
+                                    "name": str, "warned3": bool,
+                                    "warned_exp": bool}}}
+    expires=None -> unlimited. 1 month = 30 days.
+    """
 
     FILE = "users.json"
+    MONTH_SEC = 30 * 86400
 
     def _data(self):
         d = _load(self.FILE, {})
         d.setdefault("allowed", [])
+        d.setdefault("meta", {})
+        now = int(time.time())
+        for uid in d["allowed"]:
+            d["meta"].setdefault(str(uid), {
+                "added": now, "expires": None, "name": "",
+                "warned3": False, "warned_exp": False,
+            })
         return d
+
+    def _save_data(self, d):
+        _save(self.FILE, d)
 
     def allowed_ids(self):
         return set(self._data()["allowed"])
 
-    def add(self, uid: int) -> bool:
+    def add(self, uid: int, months: float = None, name: str = "") -> bool:
+        """Add user; months=None -> unlimited. Returns True if new."""
         d = self._data()
-        if uid in d["allowed"]:
-            return False
-        d["allowed"].append(uid)
-        _save(self.FILE, d)
-        return True
+        is_new = uid not in d["allowed"]
+        if is_new:
+            d["allowed"].append(uid)
+        m = d["meta"].setdefault(str(uid), {
+            "added": int(time.time()), "expires": None, "name": "",
+            "warned3": False, "warned_exp": False,
+        })
+        if name:
+            m["name"] = name
+        if months is not None:
+            m["expires"] = int(time.time() + months * self.MONTH_SEC)
+            m["warned3"] = m["warned_exp"] = False
+        self._save_data(d)
+        return is_new
 
     def remove(self, uid: int) -> bool:
         d = self._data()
         if uid not in d["allowed"]:
             return False
         d["allowed"].remove(uid)
-        _save(self.FILE, d)
+        d["meta"].pop(str(uid), None)
+        self._save_data(d)
         return True
+
+    def meta(self, uid: int) -> dict:
+        return self._data()["meta"].get(str(uid), {})
+
+    def expiry(self, uid: int):
+        """Expiry timestamp, or None for unlimited / not in list."""
+        return self.meta(uid).get("expires")
+
+    def is_expired(self, uid: int) -> bool:
+        exp = self.expiry(uid)
+        return bool(exp) and time.time() >= exp
+
+    def days_left(self, uid: int):
+        """Days remaining; None = unlimited; negative = expired."""
+        exp = self.expiry(uid)
+        if not exp:
+            return None
+        return (exp - time.time()) / 86400
+
+    def extend(self, uid: int, months: float):
+        """Add months from max(now, current expiry). Returns new exp ts,
+        or None if uid not in list."""
+        d = self._data()
+        if uid not in d["allowed"]:
+            return None
+        m = d["meta"][str(uid)]
+        base = max(int(time.time()), m.get("expires") or 0)
+        m["expires"] = int(base + months * self.MONTH_SEC)
+        m["warned3"] = m["warned_exp"] = False
+        self._save_data(d)
+        return m["expires"]
+
+    def set_flag(self, uid: int, key: str, val: bool = True) -> None:
+        d = self._data()
+        if str(uid) in d["meta"]:
+            d["meta"][str(uid)][key] = val
+            self._save_data(d)
+
+    def all_users(self) -> list:
+        """[{"id", "added", "expires", "name"}] sorted by id."""
+        d = self._data()
+        out = []
+        for uid in sorted(d["allowed"]):
+            m = d["meta"].get(str(uid), {})
+            out.append({"id": uid, "added": m.get("added"),
+                        "expires": m.get("expires"),
+                        "name": m.get("name", "")})
+        return out
 
 
 # -------------------------------------------------------------- watchlist
