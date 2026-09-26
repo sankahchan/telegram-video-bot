@@ -54,7 +54,7 @@ from web_download import (  # noqa: E402
     pot_server_hint, storyboard_only, yt_pipeline_status,
     _diagnose_formats, web_info,
 )
-from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux  # noqa: E402
+from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux, ios_container_ok  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
 from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 from torrent_download import (  # noqa: E402
@@ -304,6 +304,7 @@ HELP_OVERVIEW = (
     "/join — VPS account ကို channel join ခိုင်း (owner only)\n"
     "/xtimeline — X profile ရဲ့ latest video တွေ\n"
     "/clearcache — file_id cache ရှင်း (owner only)\n"
+    "/setconvert [ask|always|never] — MKV torrent convert မေးမလား\n"
     "/ytcheck [url] — YouTube pipeline စစ် (owner only)\n"
     "🧲 **Torrent** — magnet link ပို့ (သို့) .torrent file တင်\n"
     "   • album/pack ဆို video/audio အားလုံး + subtitle (.srt) တွဲပို့\n"
@@ -332,6 +333,18 @@ HELP_TOPICS = {
         "• /quality setting က watch/night auto-download တွေအတွက် default\n\n"
         "ဥပမာ / Example:\n"
         "  /quality low"
+    ),
+    "convert": (
+        "🔄 /setconvert — MKV torrent convert မေးမလား\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /setconvert ask     — MKV ရွေးတိုင်း မေး (default)\n"
+        "  /setconvert always  — အမြဲ auto-convert (MP4/AAC)\n"
+        "  /setconvert never   — အမြဲ original အတိုင်း\n"
+        "  /setconvert         — သုံးခုကြား ပြောင်း (toggle)\n\n"
+        "/search ရလဒ်ကနေ MKV နှိပ်ရင် download မလုပ်ခင် bot က မေးမယ်:\n"
+        "✅ Convert လုပ် / ❌ Original အတိုင်း\n\n"
+        "ဥပမာ / Example:\n"
+        "  /setconvert always"
     ),
     "mp3": (
         "🎵 /mp3 — Video ကနေ audio ထုတ် / Extract audio\n\n"
@@ -971,6 +984,30 @@ async def quality_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Quality: {'⬆️ High (မူရင်း)' if q == 'high' else '⬇️ Low (compress, file သေး)'}"
     )
+
+
+async def setconvert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """MKV torrent ရွေးရင် convert မေးမလား / အမြဲလုပ် / မလုပ်နဲ့."""
+    if not allowed(update):
+        await update.message.reply_text("⛔ ဒီ bot ကို သုံးခွင့်မရှိပါ။")
+        return
+    uid = update.effective_user.id
+    arg = context.args[0].lower() if context.args else ""
+    if arg in ("ask", "always", "never"):
+        settings.set(uid, "convert", arg)
+    elif arg == "":
+        cur = st(uid).get("convert", "ask")
+        nxt = {"ask": "always", "always": "never", "never": "ask"}.get(cur, "ask")
+        settings.set(uid, "convert", nxt)
+    else:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /setconvert ask  သို့မဟုတ်  /setconvert always  သို့မဟုတ်  /setconvert never")
+        return
+    v = st(uid).get("convert", "ask")
+    label = {"ask": "❓ အမြဲမေး (default)",
+             "always": "✅ အမြဲ auto-convert",
+             "never": "📦 အမြဲ original"}[v]
+    await update.message.reply_text(f"✅ MKV convert mode: {label}")
 
 
 async def mp3_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1930,13 +1967,29 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     kb = []
     for r in results:
-        label = r["name"][:42]
+        tag = _search_format_tag(r["name"])
+        label = (tag + " " if tag else "") + r["name"][:42]
         label += f" ({fmt_size(r['size'])}, 🌱{r['seeders']})"
         kb.append([InlineKeyboardButton(
             label, callback_data=f"dl:{r['info_hash']}")])
     await status.edit_text(
-        "🔍 တွေ့တဲ့ torrent — ဒေါင်းချင်တာ ရွေးပါ (seeders များတာကို အရင်ပြ):",
+        "🔍 တွေ့တဲ့ torrent — ဒေါင်းချင်တာ ရွေးပါ (seeders များတာကို အရင်ပြ):\n"
+        "🎬=MP4 (iPhone အဆင်ပြေ)  📦=MKV (convert မေးမယ်)",
         reply_markup=InlineKeyboardMarkup(kb))
+
+
+def _search_format_tag(name: str) -> str:
+    """Container tag from the result name only — never guesses.
+
+    Returns '📦' for explicit MKV, '🎬' for explicit MP4, '' when the name
+    doesn't name a container (the real format is confirmed after metadata).
+    """
+    n = (name or "").lower()
+    if re.search(r"\bmkv\b", n):
+        return "📦"
+    if re.search(r"\bmp4\b", n):
+        return "🎬"
+    return ""
 
 
 async def dl_pick(q, info_hash: str):
@@ -1947,7 +2000,65 @@ async def dl_pick(q, info_hash: str):
         msg = await q.edit_message_text("🧲 torrent ဒေါင်းနေပါတယ်...")
     except Exception:
         msg = q.message
-    await run_torrent(msg, uid, q.message.chat_id, magnet, True, status=msg)
+    await run_torrent(msg, uid, q.message.chat_id, magnet, True, status=msg,
+                      ask_convert=True)
+
+
+def _torrent_cache_key(sid, t, s, convert: bool) -> str:
+    """Per-file cache key — includes the convert flag (c1/c0) so a converted
+    MP4 and the original file never share an entry. v6.1.0 changed the key
+    format; older entries are simply unreachable (one re-download)."""
+    return make_key("torrent", sid, t["index"], s["mode"], s["quality"],
+                    "c1" if convert else "c0")
+
+
+async def _maybe_ask_convert(status, s, pending, source):
+    """MKV (non-iOS container) torrent picked -> ask before downloading.
+
+    Returns True/False, or None when the question was posted (the dlc:
+    callback resumes the download with the user's choice).
+    """
+    cmode = s.get("convert", "ask")
+    if cmode == "always":
+        return True
+    if cmode == "never":
+        return False
+    if all(ios_container_ok(os.path.splitext(t["path"])[1])
+           for t in pending):
+        return True  # already iPhone-friendly, no question needed
+    m = re.search(r"btih:([0-9a-fA-F]{40})", source or "")
+    if not m:
+        return True
+    ih = m.group(1).lower()
+    names = [os.path.basename(t["path"])[:42] for t in pending[:3]]
+    more = f"\n… (+{len(pending) - 3} more)" if len(pending) > 3 else ""
+    plural = "တွေ" if len(pending) > 1 else ""
+    await _send_with_retry(
+        status.edit_text,
+        "📦 MKV ဖိုင်" + plural + " တွေ့ပါတယ်:\n"
+        + "\n".join(names) + more + "\n\n"
+        "iPhone မှာ တိုက်ရိုက်ဖွင့်မရနိုင်ဘူး — "
+        "MP4/AAC convert လုပ်မလား?\n"
+        "(video quality မထိခိုက်ပါ, ၁-၂ မိနစ်ပဲ ကြာမယ်)",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Convert လုပ်",
+                                 callback_data=f"dlc:{ih}:y"),
+            InlineKeyboardButton("❌ Original အတိုင်း",
+                                 callback_data=f"dlc:{ih}:n"),
+        ]]))
+    return None
+
+
+async def dlc_pick(q, info_hash: str, yes: bool):
+    """Convert-prompt answer -> resume the torrent download with the choice."""
+    uid = q.from_user.id
+    magnet = f"magnet:?xt=urn:btih:{info_hash}"
+    try:
+        msg = await q.edit_message_text("🧲 torrent ဒေါင်းနေပါတယ်...")
+    except Exception:
+        msg = q.message
+    await run_torrent(msg, uid, q.message.chat_id, magnet, True, status=msg,
+                      convert=yes)
 
 
 # ------------------------------------------------- subtitles (/subs)
@@ -2481,6 +2592,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m:
         await dl_pick(q, m.group(1))
         return
+    m = re.fullmatch(r"dlc:([0-9a-f]{40}):([yn])", q.data or "")
+    if m:
+        await dlc_pick(q, m.group(1), m.group(2) == "y")
+        return
     m = re.fullmatch(r"subm:(tt\d+)", q.data or "")
     if m:
         await subm_pick(q, m.group(1))
@@ -2803,13 +2918,14 @@ def _size_converged(sizes, expected, need=3, min_ratio=0.95):
 
 async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
                      use_trim: bool = True, quality: str = None,
-                     note_out: list | None = None):
+                     note_out: list | None = None, convert: bool = True):
     """trim -> mp3 -> compress -> ios remux. Returns (final_path, as_audio).
 
     quality: one-time override ("high"/"low"); falls back to saved setting.
     note_out: optional list — a bilingual warning is appended when the iOS
     remux was attempted but failed, so the caller can tell the user instead
     of silently sending the unconverted original.
+    convert: False skips the iOS remux entirely (user chose the original).
     """
     s = st(uid)
     eff_quality = quality or s["quality"]
@@ -2838,7 +2954,8 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
     # 4. iOS-friendly remux: mkv/EAC3 etc. -> mp4/AAC (video stream-copy,
     #    fast). iPhone can't decode AC3/EAC3/DTS audio, which plays as
     #    silent video. Failures fall back to the original file.
-    if is_media and not as_audio and kind == "video":
+    #    convert=False (user picked the original) skips this entirely.
+    if convert and is_media and not as_audio and kind == "video":
         try:
             out = f"{tmpdir}/{idx}_ios.mp4"
             new = await ios_remux(cur, out)
@@ -2867,15 +2984,19 @@ def _with_notes(caption: str | None, notes: list) -> str:
 async def deliver(uid: int, chat_id: int, path: str, caption: str,
                   kind: str, as_audio: bool, as_video: bool, log_kind: str = "tg",
                   cache_key: str | None = None,
-                  src_url: str | None = None):
+                  src_url: str | None = None, status=None):
     """Bot ကနေ ပို့ + Saved Messages (optional) + stats.
 
     cache_key ပေးရင် ပို့ပြီးရင် Telegram file_id ကို fileid cache မှာ
     သိမ်းမယ် (နောက်တစ်ခါ ချက်ချင်းပြန်ပို့နိုင်ဖို့).
+    status ပေးရင် upload progress (%) ကို အဲ့ message မှာ ပြမယ်.
     """
     s = st(uid)
     mode = s["mode"]
     caption = build_caption(caption)
+    prog = (make_up_progress(status, os.path.basename(path),
+                             asyncio.get_running_loop())
+            if status is not None else None)
     sent, file_id, sent_kind = None, None, kind
     if as_audio or (kind == "audio" and mode == "video"):
         # MP3-extracted or Telegram audio/voice message -> proper audio bubble
@@ -2904,11 +3025,13 @@ async def deliver(uid: int, chat_id: int, path: str, caption: str,
             chat_id, path, caption=caption,
             width=meta.get("width", 0) or 0,
             height=meta.get("height", 0) or 0,
-            duration=meta.get("duration", 0) or 0)
+            duration=meta.get("duration", 0) or 0,
+            progress=prog)
         sent_kind = "video"
     else:
         # documents (PDF/ZIP/...) and anything else -> plain file
-        sent = await bot_client.send_document(chat_id, path, caption=caption)
+        sent = await bot_client.send_document(chat_id, path, caption=caption,
+                                              progress=prog)
         sent_kind = "document"
     if sent is not None and cache_key:
         try:
@@ -2994,6 +3117,21 @@ def make_tg_progress(status, tag, loop):
     return cb
 
 
+def make_up_progress(status, label: str, loop):
+    """Upload progress -> status message edits (throttled). Mirrors make_tg_progress."""
+    last = [0]
+
+    def cb(current, total):
+        pct = int(current / total * 100) if total else 0
+        if pct - last[0] >= 5:
+            last[0] = pct
+            fut = status.edit_text(f"📤 {label[:40]} — {pct}%")
+            f2 = asyncio.run_coroutine_threadsafe(fut, loop)
+            f2.add_done_callback(_swallow)
+
+    return cb
+
+
 _TORRENT_VIDEO_EXTS = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts",
     ".m4v", ".3gp", ".mpg", ".mpeg",
@@ -3042,13 +3180,18 @@ async def _offer_drive(status, uid: int, chat_id: int, source: str,
 
 async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                       is_magnet_src: bool, src_id: str | None = None,
-                      tdata: bytes | None = None, status=None) -> bool:
+                      tdata: bytes | None = None, status=None,
+                      convert: bool | None = None,
+                      ask_convert: bool = False) -> bool:
     """Magnet / .torrent download flow: metadata -> pick files -> download
     -> post-process -> deliver. source = magnet link or .torrent file path.
     src_id: stable identity for per-file cache keys (magnet itself, or the
     .torrent file's sha1). tdata: raw .torrent bytes (for the Drive-upload
     offer after the temp file is gone). status: pre-made status message
-    (background jobs) — skips the initial reply. Returns True on success."""
+    (background jobs) — skips the initial reply. Returns True on success.
+    convert: None = auto iOS remux (default); True/False = user's explicit
+    choice from the MKV convert prompt. ask_convert: /search dl: buttons set
+    this so an MKV asks before downloading (dlc: callback resumes)."""
     no_aria = ("❌ torrent engine (aria2c) မရှိသေးပါ — VPS မှာ run ပေးပါ:\n"
                "bash /opt/tg-video-bot/update.sh")
     if not have_aria2():
@@ -3086,24 +3229,37 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                                        files[0]["size"] / 1048576)
                     return False
             targets = pick_targets(files)
-            # per-file cache: hits are delivered instantly, misses download
+            # per-file cache: hits are delivered instantly, misses download.
+            # In "ask" mode either variant (c1/c0) may hit — a hit means the
+            # user already received that exact variant, so no question needed.
             pending = []
+            cands = (("c1",) if convert is True
+                     else ("c0",) if convert is False
+                     else ("c1", "c0"))
             for t in targets:
-                ck = (make_key("torrent", sid, t["index"],
-                               s["mode"], s["quality"])
-                      if _cache_eligible(uid) else None)
-                if ck:
-                    hit = fcache.get(ck)
-                    if hit:
-                        await deliver_cached(
-                            uid, chat_id, hit, os.path.basename(t["path"]))
-                        print(f"⚡ torrent cache hit {t['index']} -> {uid}")
-                        continue
-                pending.append((t, ck))
+                hit = None
+                for cf in cands:
+                    ck = (_torrent_cache_key(sid, t, s, cf == "c1")
+                          if _cache_eligible(uid) else None)
+                    if ck and fcache.get(ck):
+                        hit = fcache.get(ck)
+                        break
+                if hit:
+                    await deliver_cached(
+                        uid, chat_id, hit, os.path.basename(t["path"]))
+                    print(f"⚡ torrent cache hit {t['index']} -> {uid}")
+                    continue
+                pending.append(t)
             if not pending:
                 await status.delete()
                 return True
-            total_mb = sum(t["size"] for t, _ in pending) / 1048576
+            if ask_convert and convert is None:
+                convert = await _maybe_ask_convert(status, s, pending, source)
+                if convert is None:
+                    return False  # question posted; dlc: callback resumes
+            if convert is None:
+                convert = True
+            total_mb = sum(t["size"] for t in pending) / 1048576
             multi = len(targets) > 1
             if multi:
                 skipped = len(files) - len(targets)
@@ -3147,7 +3303,7 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                     pass
                 by_base.setdefault(os.path.basename(p), p)
             ok = 0
-            for i, (t, ck) in enumerate(pending, 1):
+            for i, t in enumerate(pending, 1):
                 tname = os.path.basename(t["path"])
                 path = by_size.get(t["size"]) or by_base.get(tname)
                 if not path or not os.path.exists(path):
@@ -3159,18 +3315,22 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 pp_notes: list = []
                 final, as_audio = await post_process(
                     path, kind, uid, tmpdir, 0, use_trim=False,
-                    note_out=pp_notes)
+                    note_out=pp_notes, convert=convert)
                 caption = _with_notes(
                     f"🧲 {tname}"
                     + (f" ({i}/{len(pending)})" if multi else ""),
                     pp_notes)
+                if not convert and not ios_container_ok(ext):
+                    caption += "\n📦 original container (convert မလုပ်ထား)"
+                ck = (_torrent_cache_key(sid, t, s, convert)
+                      if _cache_eligible(uid) else None)
                 await _send_with_retry(
                     status.edit_text,
                     f"📤 {tname} ပို့နေပါတယ်"
                     + (f" ({i}/{len(pending)})..." if multi else "..."))
                 await deliver(uid, chat_id, final, caption, kind, as_audio,
                               kind == "video", log_kind="torrent",
-                              cache_key=ck,
+                              cache_key=ck, status=status,
                               src_url=source if is_magnet_src else None)
                 ok += 1
             if ok:
@@ -3243,7 +3403,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                   _with_notes(msg.caption, pp_notes),
                                   media_kind(msg), as_audio,
                                   media_kind(msg) == "video",
-                                  src_url=_tg_src_url(cid, mid))
+                                  src_url=_tg_src_url(cid, mid), status=status)
                     await status.delete()
                 except Exception as e:
                     traceback.print_exc()
@@ -3421,7 +3581,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                 await deliver(uid, chat_id, final,
                                               _with_notes(wmsg.caption, pp_notes),
                                               wk, as_audio, wk == "video",
-                                              cache_key=t_ckey, src_url=t_src)
+                                              cache_key=t_ckey, src_url=t_src,
+                                              status=status)
                             ok += 1
                             print(f"✅ tg ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
                         except Exception as e:
@@ -3493,7 +3654,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         await deliver(uid, chat_id, final,
                                       _with_notes(title, pp_notes), wk, as_audio,
                                       wk == "video", log_kind="web",
-                                      cache_key=cache_ckey, src_url=url)
+                                      cache_key=cache_ckey, src_url=url,
+                                      status=status)
                     ok += 1
                     print(f"✅ web ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
             except Exception as e:
@@ -3807,6 +3969,7 @@ def main():
         ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
         ("tv", tv_cmd),
         ("search", search_cmd),
+        ("setconvert", setconvert_cmd),
         ("subs", subs_cmd),
         ("menu", menu_cmd),
         ("drivestatus", drivestatus_cmd),
@@ -3814,7 +3977,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
         on_button,
-        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|menu:|subm:|subs:).*"))
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|dlc:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,

@@ -177,6 +177,11 @@ _IOS_CONTAINER_OK = {".mp4", ".m4v", ".mov"}
 _IOS_AUDIO_OK = {"aac", "mp3"}
 
 
+def ios_container_ok(ext: str) -> bool:
+    """True when the container already plays on iPhone (no convert prompt needed)."""
+    return ext.lower() in _IOS_CONTAINER_OK
+
+
 async def ios_remux(src: str, dst: str) -> str:
     """Make a video iOS-Telegram friendly WITHOUT re-encoding video.
 

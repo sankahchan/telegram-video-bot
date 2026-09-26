@@ -314,6 +314,7 @@ DEFAULTS = {
     "night": False,       # queue big files for night
     "night_hour": 3,      # KST hour (0-23) to process queue
     "save": False,        # also save copy to Saved Messages
+    "convert": "ask",     # MKV torrent: ask|always|never convert to MP4/AAC
 }
 
 
