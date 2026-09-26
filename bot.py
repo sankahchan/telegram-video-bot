@@ -161,6 +161,23 @@ def quota_block_msg(used: float, quota: float) -> str:
             "ဆက်သုံးချင်ရင် owner ကို ဆက်သွယ်ပါ.")
 
 
+def _md_esc(t: str) -> str:
+    """Telegram legacy-Markdown escape for user/URL-derived text.
+
+    URLs နဲ့ feed နာမည်တွေမှာ `_` `*` `[` `]` ပါရင် Telegram က
+    "can't parse entities" error တက်တယ် — အဲ့ဒါကြောင့် escape လုပ်တယ်.
+    """
+    return re.sub(r"([_*\[\]`])", r"\\\1", t or "")
+
+
+def _tg_src_url(cid, mid) -> str:
+    """Rebuild a t.me link from (chat_id, msg_id) — for /history resend."""
+    s = str(cid)
+    if s.startswith("-100"):
+        return f"https://t.me/c/{s[4:]}/{mid}"
+    return f"https://t.me/{cid}/{mid}"
+
+
 _expired_notice = {}  # uid -> day string (notify at most once/day)
 
 
@@ -1110,7 +1127,7 @@ def _user_line(u: dict) -> str:
             st_txt = f"⚠️ {days:.0f} ရက် ကျန် ({dstr})"
         else:
             st_txt = f"✅ {days:.0f} ရက် ကျန် ({dstr})"
-    name = f" @{u['name']}" if u.get("name") else ""
+    name = f" @{_md_esc(u['name'])}" if u.get("name") else ""
     q = user_store.quota_mb(uid)
     qtxt = ""
     if q:
@@ -1234,7 +1251,7 @@ def _bookmarks_text(items: list) -> str:
     lines = ["🔖 **Bookmarks** (⬇️=ဒေါင်း, 🗑️=ဖျက်):"]
     for i, b in enumerate(items):
         ts = time.strftime("%m-%d", time.localtime(b.get("ts", 0)))
-        lines.append(f"{i + 1}. `{ts}` {(b.get('title') or '')[:55]}")
+        lines.append(f"{i + 1}. `{ts}` {_md_esc((b.get('title') or '')[:55])}")
     return "\n".join(lines)
 
 
@@ -1366,7 +1383,7 @@ def _history_view(uid: int):
     for i, it in enumerate(items):
         ts = time.strftime("%m-%d %H:%M", time.localtime(it.get("ts", 0)))
         kind, mb = it.get("kind", "?"), it.get("mb", 0) or 0
-        label = (it.get("url") or "")[:50] or kind
+        label = _md_esc((it.get("url") or "")[:50]) or kind
         lines.append(f"{i + 1}. `{ts}` [{kind}] {mb:.0f}MB\n   {label}")
         if it.get("url") or it.get("ckey"):
             kb.append([InlineKeyboardButton(f"↩️ {i + 1} ပြန်ပို့",
@@ -2166,7 +2183,7 @@ def _follows_text(uid: int) -> str:
     for v in fl.values():
         src = "🔍 TV" if v.get("kind") == "eztv" else "📡 RSS"
         mode = "🔔 notify" if v.get("mode", "auto") == "notify" else "⬇️ auto"
-        lines.append(f"• {v['name']} [{src}] — {mode}")
+        lines.append(f"• {_md_esc(v['name'])} [{src}] — {mode}")
     return "📡 **Follow list:**\n" + "\n".join(lines)
 
 
@@ -2332,6 +2349,8 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
             fresh = new_items(f, items)
             if not fresh:
                 continue
+            if kind == "eztv":
+                fresh = select_releases(fresh)  # episode တစ်ခုကို တစ်ဖိုင်ပဲ
             ok_q, _, _ = quota_allows(uid)
             if not ok_q and f.get("mode", "auto") != "notify":
                 print(f"📡 follow skipped (quota) -> {uid}")
@@ -2349,8 +2368,6 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
                         break
                     follows.mark_seen(uid, fid, it["guid"])
                 continue
-            if kind == "eztv":
-                fresh = select_releases(fresh)  # episode တစ်ခုကို တစ်ဖိုင်ပဲ
             for it in reversed(fresh):  # အဟောင်းကနေ အသစ်ဆီ
                 link = it["link"]
                 if not is_torrent_link(link):
@@ -2359,7 +2376,7 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
                 try:
                     msg = await context.bot.send_message(
                         f["chat_id"],
-                        f"📡 **{f['name']}**\n🆕 {it['title']}")
+                        f"📡 {f['name']}\n🆕 {it['title']}")
                 except Exception as e:
                     print(f"📡 follow send failed: {e}")
                     break
@@ -2548,8 +2565,9 @@ async def _drive_callback(q, action: str, token: str):
         return
     msg = q.message
     tname, size_mb = pend["tname"], pend["size_mb"]
+    tname_md = _md_esc(tname)
     try:
-        await msg.edit_text(f"☁️ `{tname}` ({size_mb:.0f}MB)\n⬇️ ဒေါင်းနေပါတယ်...",
+        await msg.edit_text(f"☁️ `{tname_md}` ({size_mb:.0f}MB)\n⬇️ ဒေါင်းနေပါတယ်...",
                             parse_mode="Markdown")
         with tempfile.TemporaryDirectory() as tmpdir:
             loop = asyncio.get_running_loop()
@@ -2578,7 +2596,7 @@ async def _drive_callback(q, action: str, token: str):
                 if pct != last[1] and now - last[0] >= 15:
                     last[0], last[1] = now, pct
                     fut = msg.edit_text(
-                        f"☁️ `{tname}`\n⬇️ {done/1048576:.0f}/{size_mb:.0f}MB ({pct}%)",
+                        f"☁️ `{tname_md}`\n⬇️ {done/1048576:.0f}/{size_mb:.0f}MB ({pct}%)",
                         parse_mode="Markdown")
                     f2 = asyncio.run_coroutine_threadsafe(fut, loop)
                     f2.add_done_callback(_swallow)
@@ -2595,7 +2613,7 @@ async def _drive_callback(q, action: str, token: str):
                 except OSError:
                     pass
             path = path or paths[0]
-            await msg.edit_text(f"☁️ `{tname}`\n📤 Drive တင်နေပါတယ်...",
+            await msg.edit_text(f"☁️ `{tname_md}`\n📤 Drive တင်နေပါတယ်...",
                                 parse_mode="Markdown")
             ulast = [0.0, -1]
 
@@ -2605,7 +2623,7 @@ async def _drive_callback(q, action: str, token: str):
                 if pct != ulast[1] and now - ulast[0] >= 15:
                     ulast[0], ulast[1] = now, pct
                     fut = msg.edit_text(
-                        f"☁️ `{tname}`\n📤 {pct}% တင်နေပါတယ်...",
+                        f"☁️ `{tname_md}`\n📤 {pct}% တင်နေပါတယ်...",
                         parse_mode="Markdown")
                     f2 = asyncio.run_coroutine_threadsafe(fut, loop)
                     f2.add_done_callback(_swallow)
@@ -2617,7 +2635,7 @@ async def _drive_callback(q, action: str, token: str):
             except Exception:
                 pass
             await msg.edit_text(
-                f"✅ Drive တင်ပြီးပါပြီ\n☁️ `{tname}` ({size_mb:.0f}MB)\n🔗 {res['link']}",
+                f"✅ Drive တင်ပြီးပါပြီ\n☁️ `{tname_md}` ({size_mb:.0f}MB)\n🔗 {res['link']}",
                 parse_mode="Markdown", disable_web_page_preview=True)
     except TorrentError as e:
         traceback.print_exc()
@@ -2975,6 +2993,7 @@ async def _offer_drive(status, uid: int, chat_id: int, source: str,
                        is_magnet_src: bool, tdata: bytes | None,
                        tname: str, size_mb: float) -> bool:
     """File too big for Telegram -> offer Google Drive upload via buttons."""
+    tname_md = _md_esc(tname)
     if not gdrive.is_configured():
         await _send_with_retry(
             status.edit_text,
@@ -2997,7 +3016,7 @@ async def _offer_drive(status, uid: int, chat_id: int, source: str,
                                callback_data=f"drive:no:{token}")]]
     await _send_with_retry(
         status.edit_text,
-        f"☁️ `{tname}` ({size_mb:.0f}MB) — Telegram (~2GB) ပို့မရပါ.\n"
+        f"☁️ `{tname_md}` ({size_mb:.0f}MB) — Telegram (~2GB) ပို့မရပါ.\n"
         "Google Drive ထဲ တင်ပေးရမလား?",
         reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return True
@@ -3176,6 +3195,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if 1 <= i <= len(results):
             cid, mid, kind, label = results[i - 1]
             del pending_finds[uid]
+            ok_q, used_q, quota_q = quota_allows(uid)
+            if not ok_q:
+                await emsg.reply_text("❌ " + quota_block_msg(used_q, quota_q))
+                return
             await emsg.reply_text(f"📥 '{label or kind}' ဒေါင်းနေပါတယ်...")
             with tempfile.TemporaryDirectory() as tmpdir:
                 loop = asyncio.get_running_loop()
@@ -3191,7 +3214,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         make_tg_progress(status, "📥", loop))
                     final, as_audio = await post_process(path, media_kind(msg), uid, tmpdir, 0)
                     await status.edit_text("📤 ပို့နေပါတယ်...")
-                    await deliver(uid, chat_id, final, msg.caption, media_kind(msg), as_audio, media_kind(msg) == "video")
+                    await deliver(uid, chat_id, final, msg.caption, media_kind(msg), as_audio, media_kind(msg) == "video",
+                                  src_url=_tg_src_url(cid, mid))
                     await status.delete()
                 except Exception as e:
                     traceback.print_exc()
@@ -3293,6 +3317,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
             try:
                 if kind == "tg":
                     cid, mid = ref
+                    t_src = _tg_src_url(cid, mid)
                     await status.edit_text(f"{tag} ရှာနေပါတယ်...")
                     print(f"📩 tg link from {uid}: chat={cid} msg={mid}")
                     msg = tg_cache.get(ref)
@@ -3364,7 +3389,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                 await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
                                 await deliver(uid, chat_id, final, wmsg.caption,
                                               wk, as_audio, wk == "video",
-                                              cache_key=t_ckey)
+                                              cache_key=t_ckey, src_url=t_src)
                             ok += 1
                             print(f"✅ tg ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
                         except Exception as e:
@@ -3547,7 +3572,8 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
                                 path, media_kind(m), uid, tmpdir, m.id, use_trim=False)
                             await deliver(uid, uid, final,
                                           f"👁️ {w.get('title','')}\n{(m.caption or '')}",
-                                          media_kind(m), as_audio, media_kind(m) == "video")
+                                          media_kind(m), as_audio, media_kind(m) == "video",
+                                          src_url=_tg_src_url(cid, m.id))
                             print(f"👁️ watch: {w.get('title')} msg {m.id} -> {uid}")
                         except Exception as e:
                             print(f"⚠️ watch download failed: {e}")
@@ -3652,7 +3678,8 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             use_trim=False, quality=nq)
                         await deliver(uid, it["chat_id"], final, msg.caption,
                                       media_kind(msg), as_audio, media_kind(msg) == "video",
-                                      cache_key=n_ckey)
+                                      cache_key=n_ckey,
+                                      src_url=_tg_src_url(ref["chat"], ref["msg"]))
                     else:
                         url = ref["url"]
                         n_ckey = None
