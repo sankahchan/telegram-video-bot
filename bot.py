@@ -67,6 +67,7 @@ from follow import (  # noqa: E402
     tvmaze_search, tvmaze_show, fetch_eztv_items, select_releases,
     apibay_search, fmt_size,
 )
+from subs import search_movies, movie_subtitles, download_subtitle  # noqa: E402
 import gdrive  # noqa: E402  (google libs imported lazily inside)
 
 from pyrogram import Client as PyroClient
@@ -191,6 +192,7 @@ WELCOME = (
     "/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ်\n"
     "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး (အလွယ်ဆုံး)\n"
     "/search <text> — torrent အကုန် ရှာ (movie/music/series/software)\n"
+    "/subs <movie> — subtitle (.srt) ရှာ\n"
     "/drivestatus — Google Drive upload status\n"
     "/nightmode [on|off] [နာရီ] — file ကြီးတွေ ညဘက်ဒေါင်း\n"
     "/save [on|off] — Saved Messages ထဲ auto-save\n"
@@ -222,6 +224,7 @@ HELP_OVERVIEW = (
     "/tv — bot ထဲကနေ series ရှာ + follow (website မလို)\n"
     "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး\n"
     "/search — torrent အကုန် ရှာ + ဒေါင်း\n"
+    "/subs — subtitle (.srt) ရှာ\n"
     "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
@@ -377,6 +380,16 @@ HELP_TOPICS = {
         "🎛️ /menu — ခလုတ်တွေနဲ့ သုံး\n\n"
         "command တွေ ရိုက်စရာမလို — /menu နှိပ်ပြီး\n"
         "ခလုတ်နှိပ်ရုံနဲ့ ရှာ / follow / setting ချိန်လို့ရတယ်."
+    ),
+    "subs": (
+        "📝 /subs — Subtitle (.srt) ရှာပြီး ပို့\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /subs <movie နာမည်>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /subs dune part two\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• English subtitles (YIFY database)\n"
+        "• ရွေးပြီးရင် .srt file တန်းပို့ပေးမယ်"
     ),
     "search": (
         "🔎 /search — Torrent အကုန် ရှာပြီး ဒေါင်း\n\n"
@@ -1372,10 +1385,98 @@ async def dl_pick(q, info_hash: str):
     await run_torrent(msg, uid, q.message.chat_id, magnet, True, status=msg)
 
 
+# ------------------------------------------------- subtitles (/subs)
+async def subs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/subs <movie name> — subtitle (.srt) ရှာပြီး ပို့."""
+    if not allowed(update):
+        return
+    query = " ".join(context.args or []).strip()
+    if not query:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /subs <movie နာမည်>\n"
+            "ဥပမာ: /subs dune part two\n"
+            "(English subtitles, YIFY database)")
+        return
+    status = await update.message.reply_text(f"📝 \"{query}\" ရှာနေပါတယ်...")
+    try:
+        movies = await asyncio.to_thread(search_movies, query)
+    except Exception as e:
+        await status.edit_text(f"❌ ရှာမရပါ: {e}")
+        return
+    if not movies:
+        await status.edit_text("❌ ဒါနဲ့ကိုက်တဲ့ movie မတွေ့ပါ.")
+        return
+    if len(movies) == 1:
+        await _show_subs(status, movies[0]["imdb"])
+        return
+    kb = [[InlineKeyboardButton(
+        m["movie"][:50], callback_data=f"subm:{m['imdb']}")]
+        for m in movies[:8]]
+    await status.edit_text("🎬 ဘယ် movie လဲ ရွေးပါ:",
+                           reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def _show_subs(msg, imdb: str):
+    """Movie page -> English subtitle buttons."""
+    try:
+        title, subs = await asyncio.to_thread(movie_subtitles, imdb)
+    except Exception as e:
+        await msg.edit_text(f"❌ subtitle ရမရပါ: {e}")
+        return
+    subs = subs[:8]
+    if not subs:
+        await msg.edit_text(
+            f"❌ \"{title}\" အတွက် English subtitle မတွေ့ပါ.")
+        return
+    kb = []
+    for s in subs:
+        rel = (s["releases"][0][:36] + "…") if s["releases"] else s["slug"]
+        star = f" ⭐{s['rating']}" if s["rating"] > 0 else ""
+        kb.append([InlineKeyboardButton(
+            f"{rel}{star}", callback_data=f"subs:{s['slug']}")])
+    await msg.edit_text(f"📝 \"{title}\" — subtitle ရွေးပါ:",
+                        reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def subm_pick(q, imdb: str):
+    try:
+        await q.edit_message_text("📝 subtitle တွေ ယူနေပါတယ်...")
+    except Exception:
+        pass
+    await _show_subs(q.message, imdb)
+
+
+async def subs_pick(q, slug: str):
+    uid = q.from_user.id
+    chat_id = q.message.chat_id
+    try:
+        msg = await q.edit_message_text("📝 subtitle ဒေါင်းနေပါတယ်...")
+    except Exception:
+        msg = q.message
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            name = slug.rsplit("-yify-", 1)[0].replace("-", " ").title()
+            path = await asyncio.to_thread(
+                download_subtitle, slug, name, tmpdir)
+            await bot_client.send_document(
+                chat_id, path, caption=f"📝 {os.path.basename(path)}")
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            await msg.edit_text(f"❌ မရပါ: {e}")
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- menu (UI/UX)
 BOT_COMMANDS = [
     ("menu", "🎛️ Menu — ခလုတ်တွေနဲ့ သုံး"),
     ("search", "🔎 Torrent ရှာ (movie/music/series)"),
+    ("subs", "📝 Subtitle (.srt) ရှာ"),
     ("tv", "🔍 Series ရှာပြီး follow"),
     ("follow", "📡 Series RSS follow"),
     ("follows", "📡 Follow list ကြည့်"),
@@ -1415,7 +1516,8 @@ def _menu_kb(uid: int) -> InlineKeyboardMarkup:
     tg = lambda v: "🟢" if v else "⚪"  # noqa: E731
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 Torrent ရှာ", callback_data="menu:search"),
-         InlineKeyboardButton("🔍 Series follow", callback_data="menu:tv")],
+         InlineKeyboardButton("🔍 Series follow", callback_data="menu:tv"),
+         InlineKeyboardButton("📝 Subs", callback_data="menu:subs")],
         [InlineKeyboardButton("📡 Follows", callback_data="menu:follows"),
          InlineKeyboardButton("📊 Stats", callback_data="menu:stats")],
         [InlineKeyboardButton(f"🎬 Mode: {s['mode']}",
@@ -1502,6 +1604,11 @@ async def menu_cb(q, action: str):
             await q.edit_message_text(
                 "🔍 Series နာမည် ပို့ပါ:\n`/tv <name>`\n"
                 "ဥပမာ: `/tv Lioness`\nရွေးပြီးရင် episode အသစ် auto-download.",
+                reply_markup=_BACK_KB, parse_mode="Markdown")
+        elif action == "subs":
+            await q.edit_message_text(
+                "📝 Movie နာမည် ပို့ပါ:\n`/subs <name>`\n"
+                "ဥပမာ: `/subs dune part two`",
                 reply_markup=_BACK_KB, parse_mode="Markdown")
         elif action == "follows":
             await q.edit_message_text(_follows_text(uid), reply_markup=_BACK_KB,
@@ -1664,6 +1771,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = re.fullmatch(r"dl:([0-9a-f]{40})", q.data or "")
     if m:
         await dl_pick(q, m.group(1))
+        return
+    m = re.fullmatch(r"subm:(tt\d+)", q.data or "")
+    if m:
+        await subm_pick(q, m.group(1))
+        return
+    m = re.fullmatch(r"subs:([a-z0-9-]+)", q.data or "")
+    if m:
+        await subs_pick(q, m.group(1))
         return
     m = re.fullmatch(r"drive:(up|no):([0-9a-f]+)", q.data or "")
     if m:
@@ -2831,12 +2946,14 @@ def main():
         ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
         ("tv", tv_cmd),
         ("search", search_cmd),
+        ("subs", subs_cmd),
         ("menu", menu_cmd),
         ("drivestatus", drivestatus_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
-        on_button, pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|menu:).*"))
+        on_button,
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
