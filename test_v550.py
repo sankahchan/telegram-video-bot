@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torrent_download as td
 from torrent_download import (
     is_magnet, extract_magnets, have_aria2,
-    torrent_files, pick_target, check_torrent_size,
+    torrent_files, pick_targets, check_torrent_size,
     download_torrent, TorrentError,
 )
 
@@ -87,16 +87,53 @@ finally:
     subprocess.run = _real_run
 
 # --- target picking ---------------------------------------------------------------------
-check("picks largest video",
-      pick_target(files)["path"] == "./movie-pack/sample.mkv")
+# single video file torrent
+check("single -> itself",
+      pick_targets([files[0]]) == [files[0]])
+# multi: video preferred, largest first
+check("multi picks video first",
+      pick_targets(files)[0]["path"] == "./movie-pack/sample.mkv")
+check("multi skips non-media",
+      all(p["path"] != "./movie-pack/poster.jpg"
+          for p in pick_targets(files)))
 non_video = [f for f in files if not f["path"].endswith(".mkv")]
 check("no video -> largest file",
-      pick_target(non_video)["path"] == "./movie-pack/poster.jpg")
+      pick_targets(non_video)[0]["path"] == "./movie-pack/poster.jpg")
 try:
-    pick_target([])
+    pick_targets([])
     check("empty raises", False)
 except TorrentError:
     check("empty raises", True)
+
+# album: many audio files, all picked largest-first
+album = [{"index": str(i), "path": f"./album/{i:02d}.flac",
+          "size": 30_000_000 - i * 100_000} for i in range(1, 13)]
+got = pick_targets(album)
+check("album: all 12 picked", len(got) == 12)
+check("album: largest first", got[0]["path"] == "./album/01.flac")
+check("album: total under cap",
+      sum(f["size"] for f in got) <= 1900 * 1048576)
+
+# caps: count and total size
+many = [{"index": str(i), "path": f"./pack/e{i:02d}.mp4",
+         "size": 50_000_000} for i in range(25)]
+got = pick_targets(many)
+check("count capped at 20", len(got) == 20)
+big_many = [{"index": str(i), "path": f"./pack/m{i:02d}.mp4",
+             "size": 200_000_000} for i in range(20)]
+got = pick_targets(big_many)
+check("count under size cap", len(got) == 9)
+check("total capped ~2GB",
+      sum(f["size"] for f in got) <= 1900 * 1048576)
+
+# oversized single file in multi -> friendly error
+big = [{"index": "1", "path": "./x/big.mkv", "size": 5 * 1073741824},
+       {"index": "2", "path": "./x/nfo.nfo", "size": 100}]
+try:
+    pick_targets(big)
+    check("oversized raises", False)
+except TorrentError as e:
+    check("oversized raises", "2GB" in str(e))
 
 # --- size cap -----------------------------------------------------------------------------
 check_torrent_size(1900 * 1048576 - 1)  # just under -> ok
@@ -114,11 +151,13 @@ _real_popen = subprocess.Popen
 class _FakePopen:
     def __init__(self, cmd, **kwargs):
         self.cmd = cmd
-        # find --dir value; simulate aria2c writing the selected file
+        # find --dir value; simulate aria2c writing the selected files
         d = cmd[cmd.index("--dir") + 1]
         os.makedirs(os.path.join(d, "data"), exist_ok=True)
         with open(os.path.join(d, "data", "sample.mkv"), "wb") as f:
             f.write(b"v" * 2048)
+        with open(os.path.join(d, "data", "track02.flac"), "wb") as f:
+            f.write(b"a" * 1024)
         self._rc = None
 
     def poll(self):
@@ -136,11 +175,13 @@ subprocess.Popen = _FakePopen  # noqa: E731
 try:
     tmp = tempfile.mkdtemp()
     calls = []
-    path = download_torrent("/tmp/fake.torrent", tmp, "1", 2048,
-                            progress_cb=lambda d, t: calls.append((d, t)))
-    check("returns downloaded file", path.endswith("sample.mkv"))
-    check("file exists", os.path.exists(path))
-    check("progress called", len(calls) >= 1 and calls[-1][0] == 2048)
+    paths = download_torrent("/tmp/fake.torrent", tmp, "1,2", 3072,
+                             progress_cb=lambda d, t: calls.append((d, t)))
+    check("returns list", isinstance(paths, list))
+    check("both files returned", len(paths) == 2)
+    check("largest first", paths[0].endswith("sample.mkv"))
+    check("all exist", all(os.path.exists(p) for p in paths))
+    check("progress called", len(calls) >= 1 and calls[-1][0] == 3072)
 finally:
     subprocess.Popen = _real_popen
 
@@ -202,11 +243,11 @@ class _ArgPopen(_FakePopen):
 subprocess.Popen = _ArgPopen  # noqa: E731
 try:
     download_torrent("magnet:?xt=urn:btih:abc", tempfile.mkdtemp(),
-                     "2", 100, None)
+                     "1,3", 100, None)
 finally:
     subprocess.Popen = _real_popen
 cmd = seen["cmd"]
-check("select-file passed", "--select-file" in cmd and "2" in cmd)
+check("select-file passed", "--select-file" in cmd and "1,3" in cmd)
 check("seeding disabled", "--seed-time=0" in cmd)
 check("upload capped", "--max-upload-limit=50K" in cmd)
 

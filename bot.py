@@ -58,7 +58,7 @@ from filecache import FileIdCache, make_key  # noqa: E402
 from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 from torrent_download import (  # noqa: E402
     is_magnet, extract_magnets, have_aria2, fetch_magnet_metadata,
-    torrent_files, pick_target, download_torrent, check_torrent_size,
+    torrent_files, pick_targets, download_torrent, check_torrent_size,
     TorrentError, MAX_TORRENT_FILE_MB,
 )
 
@@ -1485,25 +1485,18 @@ _TORRENT_AUDIO_EXTS = {
 
 
 async def run_torrent(emsg, uid: int, chat_id: int, source: str,
-                      is_magnet_src: bool, cache_key: str | None = None):
-    """Magnet / .torrent download flow: metadata -> pick file -> download
-    -> post-process -> deliver. source = magnet link or .torrent file path."""
+                      is_magnet_src: bool, src_id: str | None = None):
+    """Magnet / .torrent download flow: metadata -> pick files -> download
+    -> post-process -> deliver. source = magnet link or .torrent file path.
+    src_id: stable identity for per-file cache keys (magnet itself, or the
+    .torrent file's sha1)."""
     if not have_aria2():
         await emsg.reply_text(
             "❌ torrent engine (aria2c) မရှိသေးပါ — VPS မှာ run ပေးပါ:\n"
             "bash /opt/tg-video-bot/update.sh")
         return
     s = st(uid)
-    if cache_key is None and is_magnet_src and _cache_eligible(uid):
-        cache_key = make_key("torrent", source, s["mode"], s["quality"])
-    if cache_key:
-        hit = fcache.get(cache_key)
-        if hit:
-            await _send_with_retry(
-                emsg.reply_text, "🧲 ⚡ မှတ်ထားပြီးသား — ချက်ချင်းပို့နေပါတယ်...")
-            await deliver_cached(uid, chat_id, hit, source)
-            print(f"⚡ torrent cache hit -> {uid}")
-            return
+    sid = src_id or source
     status = await _send_with_retry(
         emsg.reply_text, "🧲 torrent ပြင်ဆင်နေပါတယ်...")
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1520,20 +1513,40 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 tpath = source
                 aria_src = tpath
             files = await asyncio.to_thread(torrent_files, tpath)
-            target = pick_target(files)
-            check_torrent_size(target["size"])
-            tname = os.path.basename(target["path"])
-            size_mb = target["size"] / 1048576
-            if len(files) > 1:
+            targets = pick_targets(files)
+            if len(files) == 1:
+                check_torrent_size(targets[0]["size"])
+            # per-file cache: hits are delivered instantly, misses download
+            pending = []
+            for t in targets:
+                ck = (make_key("torrent", sid, t["index"],
+                               s["mode"], s["quality"])
+                      if _cache_eligible(uid) else None)
+                if ck:
+                    hit = fcache.get(ck)
+                    if hit:
+                        await deliver_cached(
+                            uid, chat_id, hit, os.path.basename(t["path"]))
+                        print(f"⚡ torrent cache hit {t['index']} -> {uid}")
+                        continue
+                pending.append((t, ck))
+            if not pending:
+                await status.delete()
+                return
+            total_mb = sum(t["size"] for t, _ in pending) / 1048576
+            multi = len(targets) > 1
+            if multi:
+                skipped = len(files) - len(targets)
+                extra = f" ({skipped} ကျော်)" if skipped else ""
                 await _send_with_retry(
                     status.edit_text,
-                    f"🧲 `{tname}`\n"
-                    f"📦 {len(files)} files ထဲက အကြီးဆုံး video ကို ရွေးထားပါတယ် "
-                    f"({size_mb:.0f}MB)")
+                    f"🧲 {len(targets)} files{extra} — "
+                    f"{total_mb:.0f}MB\n⬇️ ဒေါင်းနေပါတယ်...")
             else:
+                tname0 = os.path.basename(targets[0]["path"])
                 await _send_with_retry(
                     status.edit_text,
-                    f"🧲 `{tname}` ({size_mb:.0f}MB)")
+                    f"🧲 `{tname0}`\n⬇️ ဒေါင်းနေပါတယ် (0/{total_mb:.0f}MB)...")
 
             last_edit = [0.0, -1]
 
@@ -1543,28 +1556,48 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 if pct != last_edit[1] and now - last_edit[0] >= 10:
                     last_edit[0], last_edit[1] = now, pct
                     fut = status.edit_text(
-                        f"🧲 `{tname}`\n"
-                        f"⬇️ {done/1048576:.0f}/{size_mb:.0f}MB ({pct}%)")
+                        f"🧲 ⬇️ {done/1048576:.0f}/{total_mb:.0f}MB ({pct}%)")
                     f2 = asyncio.run_coroutine_threadsafe(fut, loop)
                     f2.add_done_callback(_swallow)
 
-            await _send_with_retry(
-                status.edit_text,
-                f"🧲 `{tname}`\n⬇️ ဒေါင်းနေပါတယ် (0/{size_mb:.0f}MB)...")
-            path = await asyncio.to_thread(
-                download_torrent, aria_src, tmpdir, target["index"],
-                target["size"], _prog)
-            ext = os.path.splitext(path)[1].lower()
-            kind = ("video" if ext in _TORRENT_VIDEO_EXTS
-                    else "audio" if ext in _TORRENT_AUDIO_EXTS else "doc")
-            await _send_with_retry(status.edit_text, "📤 ပို့နေပါတယ်...")
-            final, as_audio = await post_process(
-                path, kind, uid, tmpdir, 0, use_trim=False)
-            caption = f"🧲 {tname}"
-            await deliver(uid, chat_id, final, caption, kind, as_audio,
-                          kind == "video", log_kind="torrent",
-                          cache_key=cache_key)
-            await status.delete()
+            idxs = ",".join(t["index"] for t, _ in pending)
+            total = sum(t["size"] for t, _ in pending)
+            paths = await asyncio.to_thread(
+                download_torrent, aria_src, tmpdir, idxs, total, _prog)
+            by_size, by_base = {}, {}
+            for p in paths:
+                try:
+                    by_size.setdefault(os.path.getsize(p), p)
+                except OSError:
+                    pass
+                by_base.setdefault(os.path.basename(p), p)
+            ok = 0
+            for i, (t, ck) in enumerate(pending, 1):
+                tname = os.path.basename(t["path"])
+                path = by_size.get(t["size"]) or by_base.get(tname)
+                if not path or not os.path.exists(path):
+                    print(f"⚠️ torrent: {tname} not in downloaded files")
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                kind = ("video" if ext in _TORRENT_VIDEO_EXTS
+                        else "audio" if ext in _TORRENT_AUDIO_EXTS else "doc")
+                final, as_audio = await post_process(
+                    path, kind, uid, tmpdir, 0, use_trim=False)
+                caption = (f"🧲 {tname}"
+                           + (f" ({i}/{len(pending)})" if multi else ""))
+                await _send_with_retry(
+                    status.edit_text,
+                    f"📤 {tname} ပို့နေပါတယ်"
+                    + (f" ({i}/{len(pending)})..." if multi else "..."))
+                await deliver(uid, chat_id, final, caption, kind, as_audio,
+                              kind == "video", log_kind="torrent",
+                              cache_key=ck)
+                ok += 1
+            if ok:
+                await status.delete()
+            else:
+                await _send_with_retry(
+                    status.edit_text, "❌ file တွေ ရှာမတွေ့ပါ.")
         except TorrentError as e:
             traceback.print_exc()
             await _send_with_retry(status.edit_text, str(e))
@@ -1920,14 +1953,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await download_tg_media(msg, tpath, None)
             await status.delete()
-            ckey = None
-            if _cache_eligible(uid):
-                s = st(uid)
-                with open(tpath, "rb") as f:
-                    ckey = make_key("torrent", hashlib.sha1(f.read()).hexdigest(),
-                                    s["mode"], s["quality"])
-            await run_torrent(emsg, uid, chat_id, tpath, False,
-                              cache_key=ckey)
+            with open(tpath, "rb") as f:
+                sid = "file:" + hashlib.sha1(f.read()).hexdigest()
+            await run_torrent(emsg, uid, chat_id, tpath, False, src_id=sid)
         except Exception as e:
             traceback.print_exc()
             await status.edit_text(f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")

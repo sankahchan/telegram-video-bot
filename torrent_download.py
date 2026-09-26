@@ -28,6 +28,10 @@ _POLL_S = 5
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts",
                ".m4v", ".3gp", ".mpg", ".mpeg"}
+_AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac",
+               ".alac", ".wma"}
+
+MAX_TORRENT_FILES = 20  # multi-file torrent: အများဆုံး ဒီအရေအတွက် ပို့
 
 
 class TorrentError(Exception):
@@ -109,14 +113,35 @@ def torrent_files(torrent_path: str) -> list:
     return files
 
 
-def pick_target(files: list) -> dict:
-    """Largest video file; else the largest file."""
+def pick_targets(files: list, max_files: int = MAX_TORRENT_FILES,
+                 max_total_mb: int = MAX_TORRENT_FILE_MB) -> list:
+    """Which files to download.
+
+    Single file -> itself. Multi-file (album, season pack, ...) -> the
+    video/audio files, largest-first, capped by count and total size so a
+    huge pack can't blow the ~2GB Telegram limit or spam the chat.
+    """
     if not files:
         raise TorrentError("torrent ထဲမှာ file မရှိပါ.")
-    videos = [f for f in files
-              if os.path.splitext(f["path"])[1].lower() in _VIDEO_EXTS]
-    pool = videos or files
-    return max(pool, key=lambda f: f["size"])
+    if len(files) == 1:
+        return [files[0]]
+    media = [f for f in files
+             if os.path.splitext(f["path"])[1].lower()
+             in (_VIDEO_EXTS | _AUDIO_EXTS)]
+    pool = sorted(media or files, key=lambda f: f["size"], reverse=True)
+    picked, total = [], 0
+    cap = max_total_mb * 1048576
+    for f in pool:
+        if len(picked) >= max_files:
+            break
+        if total + f["size"] > cap:
+            continue
+        picked.append(f)
+        total += f["size"]
+    if not picked:
+        # the largest file alone already exceeds the Telegram cap
+        check_torrent_size(pool[0]["size"])  # raises the friendly error
+    return picked
 
 
 def _dir_size(path: str) -> int:
@@ -132,16 +157,18 @@ def _dir_size(path: str) -> int:
     return total
 
 
-def download_torrent(source: str, tmpdir: str, file_index: str,
+def download_torrent(source: str, tmpdir: str, file_indexes: str,
                      expected_total: int, progress_cb=None,
-                     timeout: int = _DOWNLOAD_TIMEOUT) -> str:
-    """Selectively download one file from a torrent/magnet. Returns file path.
+                     timeout: int = _DOWNLOAD_TIMEOUT) -> list:
+    """Selectively download file(s) from a torrent/magnet.
 
+    file_indexes: aria2c --select-file value, e.g. "2" or "1,3,5".
     progress_cb: sync fn(done_bytes, total_bytes).
+    Returns list of downloaded file paths, largest first.
     """
     dl_dir = os.path.join(tmpdir, "tdata")
     os.makedirs(dl_dir, exist_ok=True)
-    cmd = ["aria2c", "--select-file", str(file_index),
+    cmd = ["aria2c", "--select-file", str(file_indexes),
            "--seed-time=0", "--max-upload-limit=50K",
            "--allow-overwrite=true", "--dir", dl_dir,
            "--console-log-level=warn", "--summary-interval=0",
@@ -188,8 +215,8 @@ def download_torrent(source: str, tmpdir: str, file_index: str,
                 proc.wait(timeout=10)
             except Exception:
                 pass
-    # locate the downloaded file (largest non-.torrent file wins)
-    best = (None, -1)
+    # collect every completed file, largest first
+    found = []
     for root, _dirs, filenames in os.walk(dl_dir):
         for fn in filenames:
             if fn.endswith(".torrent"):
@@ -199,11 +226,12 @@ def download_torrent(source: str, tmpdir: str, file_index: str,
                 sz = os.path.getsize(p)
             except OSError:
                 continue
-            if sz > best[1]:
-                best = (p, sz)
-    if not best[0] or best[1] <= 0:
+            if sz > 0:
+                found.append((p, sz))
+    if not found:
         raise TorrentError("❌ download ပြီးပေမယ့် file မတွေ့ပါ.")
-    return best[0]
+    found.sort(key=lambda x: x[1], reverse=True)
+    return [p for p, _ in found]
 
 
 def check_torrent_size(size_bytes: int):
