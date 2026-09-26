@@ -343,7 +343,8 @@ HELP_TOPICS = {
         "  /setconvert never   — အမြဲ original အတိုင်း\n"
         "  /setconvert         — သုံးခုကြား ပြောင်း (toggle)\n\n"
         "/search ရလဒ်ကနေ MKV နှိပ်ရင် download မလုပ်ခင် bot က မေးမယ်:\n"
-        "✅ Convert လုပ် / ❌ Original အတိုင်း\n\n"
+        "✅ Convert လုပ် / ❌ Original အတိုင်း\n"
+        "(VLC app ရှိရင် Original အတိုင်းယူပြီး VLC နဲ့ တိုက်ရိုက်ကြည့်လို့ရတယ်)\n\n"
         "ဥပမာ / Example:\n"
         "  /setconvert always"
     ),
@@ -2136,7 +2137,8 @@ async def _maybe_ask_convert(status, s, pending, source):
         + "\n".join(names) + more + "\n\n"
         "iPhone မှာ တိုက်ရိုက်ဖွင့်မရနိုင်ဘူး — "
         "MP4/AAC convert လုပ်မလား?\n"
-        "(video quality မထိခိုက်ပါ, ၁-၂ မိနစ်ပဲ ကြာမယ်)",
+        "(video quality မထိခိုက်ပါ, ၁-၂ မိနစ်ပဲ ကြာမယ်)\n"
+        "VLC app ရှိရင် Original အတိုင်းယူပြီး VLC နဲ့ တိုက်ရိုက်ကြည့်လို့ရတယ်.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Convert လုပ်",
                                  callback_data=f"dlc:{ih}:y"),
