@@ -439,6 +439,72 @@ q3.answer = _ans3
 asyncio.run(bot.ssort_pick(q3, key, "mp4"))
 check("wrong user blocked", answered3 and answered3[0].get("show_alert") is True)
 
+# --- 13. handle_document: .torrent via Bot API, not fetch_message ------------
+class FakeTGFile:
+    async def download_to_drive(self, path):
+        with open(path, "wb") as f:
+            f.write(b"d8:announce4:test4:infoi1ee")
+
+
+class FakeDocMsg(FakeMsg):
+    def __init__(self):
+        super().__init__()
+        self.document = types.SimpleNamespace(
+            file_name="MobLand_S02E01.torrent",
+            mime_type="application/x-bittorrent",
+            get_file=lambda: _FakeGetFile())
+        self.message_id = 777
+
+    async def delete(self, *a, **k):
+        return None
+
+
+class _FakeGetFile:
+    def __await__(self):
+        async def _c():
+            return FakeTGFile()
+        return _c().__await__()
+
+
+called = {}
+async def _no_fetch(*a, **k):
+    called["fetch"] = True
+    raise AssertionError("fetch_message must not be used for .torrent uploads")
+orig_fetch = bot.fetch_message
+bot.fetch_message = _no_fetch
+rt_args = {}
+async def _fake_run_torrent(*a, **k):
+    rt_args["tdata"] = k.get("tdata")
+    rt_args["tpath"] = a[3] if len(a) > 3 else k.get("tpath")
+orig_rt = bot.run_torrent
+bot.run_torrent = _fake_run_torrent
+upd = types.SimpleNamespace(
+    effective_message=FakeDocMsg(),
+    effective_user=types.SimpleNamespace(id=1),
+    effective_chat=types.SimpleNamespace(id=1))
+asyncio.run(bot.handle_document(upd, None))
+bot.fetch_message = orig_fetch
+bot.run_torrent = orig_rt
+check("fetch_message not used", "fetch" not in called)
+check("run_torrent got torrent bytes",
+      rt_args.get("tdata") == b"d8:announce4:test4:infoi1ee")
+check("torrent staged as upload.torrent",
+      rt_args.get("tpath") and rt_args["tpath"].endswith("upload.torrent"))
+# non-torrent documents are ignored
+ignored = {"called": False}
+class FakeOtherDoc(FakeDocMsg):
+    def __init__(self):
+        super().__init__()
+        self.document = types.SimpleNamespace(
+            file_name="notes.pdf", mime_type="application/pdf",
+            get_file=lambda: _FakeGetFile())
+upd2 = types.SimpleNamespace(
+    effective_message=FakeOtherDoc(),
+    effective_user=types.SimpleNamespace(id=1),
+    effective_chat=types.SimpleNamespace(id=1))
+asyncio.run(bot.handle_document(upd2, None))
+check("non-torrent ignored", True)  # returned without error
+
 print(f"\nPASS: {len(PASS)} checks")
 for p in PASS:
     print(f"  ✓ {p}")

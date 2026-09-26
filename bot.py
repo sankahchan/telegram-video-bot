@@ -3826,12 +3826,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             tpath = os.path.join(tmpdir, "upload.torrent")
-            msg, _, err = await fetch_message(chat_id, emsg.message_id)
-            if not msg or not msg.document:
-                await status.edit_text(
-                    f"❌ file ရယူမရပါ: {friendly_peer_error(err) or (err or '?')}")
-                return
-            await download_tg_media(msg, tpath, None)
+            # The .torrent was sent TO THE BOT, so the Bot API serves it
+            # directly. (fetch_message via the user-session account fails
+            # here — that account isn't a participant in the bot's DM chat.)
+            tg_file = await doc.get_file()
+            await tg_file.download_to_drive(tpath)
             await status.delete()
             with open(tpath, "rb") as f:
                 tdata = f.read()
