@@ -68,6 +68,11 @@ async def fake_probe(path):
 
 async def fake_ffmpeg_ok(args):
     calls.append(list(args))
+    # a real successful ffmpeg run always creates the output file
+    # (v6.0.3 ios_remux validates it exists and is non-empty)
+    dst = args[-1]
+    with open(dst, "wb") as f:
+        f.write(b"\x00" * 2048)
     return None
 
 
@@ -75,6 +80,9 @@ async def fake_ffmpeg_fail_once(args):
     calls.append(list(args))
     if "-c:s" in args:
         raise RuntimeError("ffmpeg error")
+    dst = args[-1]
+    with open(dst, "wb") as f:
+        f.write(b"\x00" * 2048)
     return None
 
 
@@ -171,3 +179,10 @@ check("remux failure falls back",
       "ios remux failed, sending original" in src)
 
 print(f"✅ v5.7.2 ios-remux: {len(PASS)} tests passed")
+
+# fake ffmpeg runs (v6.0.3: now creating a dummy output file) litter out.mp4
+try:
+    os.remove(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "out.mp4"))
+except OSError:
+    pass

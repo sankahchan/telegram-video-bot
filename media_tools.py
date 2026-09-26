@@ -24,11 +24,18 @@ async def _run_ffmpeg(args):
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", *args,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    rc = await proc.wait()
-    if rc != 0:
-        raise RuntimeError("ffmpeg error")
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        # Keep the tail of ffmpeg's own error output — a bare
+        # "ffmpeg error" made VPS failures (e.g. the iOS remux one)
+        # impossible to diagnose from the journal.
+        tail = (err or b"").decode("utf-8", "replace").strip().splitlines()
+        # keep the END of the output (the actual error); ffmpeg's banner
+        # alone can exceed the budget and would otherwise crowd it out
+        tail = "\n".join(tail[-12:])[-800:]
+        raise RuntimeError(f"ffmpeg error (rc={proc.returncode}): {tail}")
 
 
 async def to_mp3(src: str, dst: str) -> str:
@@ -186,8 +193,11 @@ async def ios_remux(src: str, dst: str) -> str:
     ext = os.path.splitext(src)[1].lower()
     streams = await asyncio.to_thread(probe_streams, src)
     acodec = (streams or {}).get("audio")
+    vcodec = (streams or {}).get("video")
     if ext in _IOS_CONTAINER_OK and acodec in (None, *_IOS_AUDIO_OK):
         return src
+    if not vcodec:
+        raise RuntimeError("video stream မတွေ့လို့ convert မလုပ်နိုင်ပါ")
     base = ["-i", src, "-map", "0:v?", "-c:v", "copy"]
     if acodec:
         base += ["-map", "0:a?"]
@@ -199,9 +209,21 @@ async def ios_remux(src: str, dst: str) -> str:
     try:
         # try 1: keep text subtitles
         await _run_ffmpeg(base + ["-map", "0:s?", "-c:s", "mov_text", dst])
-        return dst
     except RuntimeError:
-        pass
-    # try 2: bitmap subtitles (PGS) can't go into MP4 -> drop them
-    await _run_ffmpeg(base + ["-sn", dst])
+        # try 2: bitmap subtitles (PGS) can't go into MP4 -> drop them
+        await _run_ffmpeg(base + ["-sn", dst])
+    # --- validate the output: never hand back a broken or silent file ---
+    if not os.path.exists(dst) or os.path.getsize(dst) < 1024:
+        raise RuntimeError("convert output file ပျက်နေပါတယ်")
+    if acodec:
+        out_streams = await asyncio.to_thread(probe_streams, dst)
+        if not (out_streams or {}).get("audio"):
+            # Source had audio but the remux lost it (e.g. probe failed and
+            # audio was never mapped) — a silent video is worse than the
+            # original, so fail loudly and let the caller fall back.
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            raise RuntimeError("convert လုပ်ပြီးမှ အသံပါမလာပါ")
     return dst

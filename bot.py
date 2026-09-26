@@ -2802,10 +2802,14 @@ def _size_converged(sizes, expected, need=3, min_ratio=0.95):
 
 
 async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
-                     use_trim: bool = True, quality: str = None):
-    """trim -> mp3 -> compress. Returns (final_path, as_audio).
+                     use_trim: bool = True, quality: str = None,
+                     note_out: list | None = None):
+    """trim -> mp3 -> compress -> ios remux. Returns (final_path, as_audio).
 
     quality: one-time override ("high"/"low"); falls back to saved setting.
+    note_out: optional list — a bilingual warning is appended when the iOS
+    remux was attempted but failed, so the caller can tell the user instead
+    of silently sending the unconverted original.
     """
     s = st(uid)
     eff_quality = quality or s["quality"]
@@ -2842,8 +2846,22 @@ async def post_process(path: str, kind: str, uid: int, tmpdir: str, idx: int,
                 print(f"📱 ios remux: {os.path.basename(cur)} -> mp4/AAC")
                 cur = new
         except Exception as e:
-            print(f"⚠️ ios remux failed, sending original: {e}")
+            print(f"⚠️ ios remux failed, sending original "
+                  f"({os.path.basename(cur)}): {e}")
+            if note_out is not None:
+                note_out.append(
+                    "⚠️ iPhone အတွက် convert မအောင်မြင်ပါ — "
+                    "original file အတိုင်း ပို့လိုက်ပါတယ်\n"
+                    "⚠️ iPhone conversion failed — sent the original file")
     return cur, as_audio
+
+
+def _with_notes(caption: str | None, notes: list) -> str:
+    """post_process warning notes (e.g. failed iOS remux) ကို caption မှာ ထည့်."""
+    base = caption or ""
+    if notes:
+        base = (base + "\n" + "\n".join(notes)).strip()
+    return base
 
 
 async def deliver(uid: int, chat_id: int, path: str, caption: str,
@@ -3138,10 +3156,14 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 ext = os.path.splitext(path)[1].lower()
                 kind = ("video" if ext in _TORRENT_VIDEO_EXTS
                         else "audio" if ext in _TORRENT_AUDIO_EXTS else "doc")
+                pp_notes: list = []
                 final, as_audio = await post_process(
-                    path, kind, uid, tmpdir, 0, use_trim=False)
-                caption = (f"🧲 {tname}"
-                           + (f" ({i}/{len(pending)})" if multi else ""))
+                    path, kind, uid, tmpdir, 0, use_trim=False,
+                    note_out=pp_notes)
+                caption = _with_notes(
+                    f"🧲 {tname}"
+                    + (f" ({i}/{len(pending)})" if multi else ""),
+                    pp_notes)
                 await _send_with_retry(
                     status.edit_text,
                     f"📤 {tname} ပို့နေပါတယ်"
@@ -3212,9 +3234,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     path = await download_tg_media(
                         msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), "find")),
                         make_tg_progress(status, "📥", loop))
-                    final, as_audio = await post_process(path, media_kind(msg), uid, tmpdir, 0)
+                    pp_notes: list = []
+                    final, as_audio = await post_process(
+                        path, media_kind(msg), uid, tmpdir, 0,
+                        note_out=pp_notes)
                     await status.edit_text("📤 ပို့နေပါတယ်...")
-                    await deliver(uid, chat_id, final, msg.caption, media_kind(msg), as_audio, media_kind(msg) == "video",
+                    await deliver(uid, chat_id, final,
+                                  _with_notes(msg.caption, pp_notes),
+                                  media_kind(msg), as_audio,
+                                  media_kind(msg) == "video",
                                   src_url=_tg_src_url(cid, mid))
                     await status.delete()
                 except Exception as e:
@@ -3380,14 +3408,18 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             path = await download_tg_media(
                                 wmsg, os.path.join(tmpdir, original_filename(wmsg, wk, wtag)),
                                 make_tg_progress(status, tag, loop))
+                            pp_notes: list = []
                             final, as_audio = await post_process(
-                                path, wk, uid, tmpdir, wtag, quality=quality)
+                                path, wk, uid, tmpdir, wtag, quality=quality,
+                                note_out=pp_notes)
                             if s["zip"]:
-                                collected.append((final, build_caption(wmsg.caption),
+                                collected.append((final, _with_notes(
+                                    build_caption(wmsg.caption), pp_notes),
                                                   wk, as_audio))
                             else:
                                 await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
-                                await deliver(uid, chat_id, final, wmsg.caption,
+                                await deliver(uid, chat_id, final,
+                                              _with_notes(wmsg.caption, pp_notes),
                                               wk, as_audio, wk == "video",
                                               cache_key=t_ckey, src_url=t_src)
                             ok += 1
@@ -3449,13 +3481,17 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                 wk = direct_file_kind(url)
                             else:
                                 raise
+                    pp_notes: list = []
                     final, as_audio = await post_process(
-                        path, wk, uid, tmpdir, idx, quality=quality)
+                        path, wk, uid, tmpdir, idx, quality=quality,
+                        note_out=pp_notes)
                     if s["zip"]:
-                        collected.append((final, title, wk, as_audio))
+                        collected.append((final, _with_notes(title, pp_notes),
+                                          wk, as_audio))
                     else:
                         await status.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
-                        await deliver(uid, chat_id, final, title, wk, as_audio,
+                        await deliver(uid, chat_id, final,
+                                      _with_notes(title, pp_notes), wk, as_audio,
                                       wk == "video", log_kind="web",
                                       cache_key=cache_ckey, src_url=url)
                     ok += 1
@@ -3568,10 +3604,14 @@ async def watch_job(context: ContextTypes.DEFAULT_TYPE):
                         try:
                             path = await download_tg_media(
                                 m, os.path.join(tmpdir, original_filename(m, media_kind(m), "w")), None)
+                            pp_notes: list = []
                             final, as_audio = await post_process(
-                                path, media_kind(m), uid, tmpdir, m.id, use_trim=False)
+                                path, media_kind(m), uid, tmpdir, m.id,
+                                use_trim=False, note_out=pp_notes)
                             await deliver(uid, uid, final,
-                                          f"👁️ {w.get('title','')}\n{(m.caption or '')}",
+                                          _with_notes(
+                                              f"👁️ {w.get('title','')}\n{(m.caption or '')}",
+                                              pp_notes),
                                           media_kind(m), as_audio, media_kind(m) == "video",
                                           src_url=_tg_src_url(cid, m.id))
                             print(f"👁️ watch: {w.get('title')} msg {m.id} -> {uid}")
@@ -3673,10 +3713,12 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                                 continue
                         path = await download_tg_media(
                             msg, os.path.join(tmpdir, original_filename(msg, media_kind(msg), "n")), None)
+                        pp_notes: list = []
                         final, as_audio = await post_process(
                             path, media_kind(msg), uid, tmpdir, 0,
-                            use_trim=False, quality=nq)
-                        await deliver(uid, it["chat_id"], final, msg.caption,
+                            use_trim=False, quality=nq, note_out=pp_notes)
+                        await deliver(uid, it["chat_id"], final,
+                                      _with_notes(msg.caption, pp_notes),
                                       media_kind(msg), as_audio, media_kind(msg) == "video",
                                       cache_key=n_ckey,
                                       src_url=_tg_src_url(ref["chat"], ref["msg"]))
@@ -3697,9 +3739,12 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             path, title = await download_web(
                                 url, tmpdir, quality=nq)
                             wk = "video"
+                        pp_notes: list = []
                         final, as_audio = await post_process(
-                            path, wk, uid, tmpdir, 0, use_trim=False, quality=nq)
-                        await deliver(uid, it["chat_id"], final, title,
+                            path, wk, uid, tmpdir, 0, use_trim=False,
+                            quality=nq, note_out=pp_notes)
+                        await deliver(uid, it["chat_id"], final,
+                                      _with_notes(title, pp_notes),
                                       wk, as_audio, wk == "video", log_kind="web",
                                       cache_key=n_ckey, src_url=url)
                     try:
