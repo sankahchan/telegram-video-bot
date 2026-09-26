@@ -371,6 +371,18 @@ check("web-dl stays unknown",
 check("release group not a container",
       bot._search_format_tag("Show.S01.MkvKing.1080p") == "")
 
+# --- 10. /search label: size first ----------------------------------------
+r = {"name": "The Legend of Hei 2019 1080p BluRay DDP 5.1 x264-iVy",
+     "size": 1028443341, "seeders": 120}
+lbl = bot._search_label(r)
+check("label starts with tag", lbl.startswith("📦~ "))
+check("label shows size", "980.8 MB" in lbl)
+check("label shows seeders", "🌱120" in lbl)
+check("label ends with name", "The Legend of Hei" in lbl)
+r2 = {"name": "Show.S01.1080p.AMZN.WEB-DL", "size": 734003200, "seeders": 5}
+lbl2 = bot._search_label(r2)
+check("no-tag label still shows size", lbl2.startswith("700MB") or "MB" in lbl2.split("·")[0])
+
 print(f"\nPASS: {len(PASS)} checks")
 for p in PASS:
     print(f"  ✓ {p}")

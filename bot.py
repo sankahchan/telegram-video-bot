@@ -1967,15 +1967,25 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     kb = []
     for r in results:
-        tag = _search_format_tag(r["name"])
-        label = (tag + " " if tag else "") + r["name"][:42]
-        label += f" ({fmt_size(r['size'])}, 🌱{r['seeders']})"
         kb.append([InlineKeyboardButton(
-            label, callback_data=f"dl:{r['info_hash']}")])
+            _search_label(r), callback_data=f"dl:{r['info_hash']}")])
     await status.edit_text(
         "🔍 တွေ့တဲ့ torrent — ဒေါင်းချင်တာ ရွေးပါ (seeders များတာကို အရင်ပြ):\n"
         "🎬=တိုက်ရိုက်ကြည့် 📦=convert မေးမယ် (~=ခန့်မှန်း)",
         reply_markup=InlineKeyboardMarkup(kb))
+
+
+def _search_label(r: dict) -> str:
+    """Inline button label — size + seeders FIRST (always visible), then name.
+
+    Telegram truncates long button text, so the old layout
+    (name[:42] + size) hid the size. Front-loading guarantees Chan sees
+    the file size and seeder count on every result.
+    """
+    tag = _search_format_tag(r["name"])
+    head = f"{tag} " if tag else ""
+    head += f"{fmt_size(r['size'])} · 🌱{r['seeders']} · "
+    return head + r["name"][:24]
 
 
 def _search_format_tag(name: str) -> str:
