@@ -64,6 +64,8 @@ from torrent_download import (  # noqa: E402
 )
 from follow import (  # noqa: E402
     FollowStore, fetch_items, new_items, is_torrent_link, MAX_ATTEMPTS,
+    tvmaze_search, tvmaze_show, fetch_eztv_items, select_releases,
+    apibay_search, fmt_size,
 )
 import gdrive  # noqa: E402  (google libs imported lazily inside)
 
@@ -186,6 +188,8 @@ WELCOME = (
     "/unwatch /watchlist\n"
     "/follow <rss-url> [name] — series episode အသစ် auto-download\n"
     "/unfollow /follows\n"
+    "/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ်\n"
+    "/search <text> — torrent အကုန် ရှာ (movie/music/series/software)\n"
     "/drivestatus — Google Drive upload status\n"
     "/nightmode [on|off] [နာရီ] — file ကြီးတွေ ညဘက်ဒေါင်း\n"
     "/save [on|off] — Saved Messages ထဲ auto-save\n"
@@ -214,6 +218,8 @@ HELP_OVERVIEW = (
     "/unwatch /watchlist\n"
     "/follow — series RSS, episode အသစ် auto-download\n"
     "/unfollow /follows\n"
+    "/tv — bot ထဲကနေ series ရှာ + follow (website မလို)\n"
+    "/search — torrent အကုန် ရှာ + ဒေါင်း\n"
     "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
@@ -353,6 +359,28 @@ HELP_TOPICS = {
         "📡 /follows — Follow လုပ်ထားတဲ့ series များ ကြည့်\n\n"
         "အသုံးပြုပုံ / Usage:\n"
         "  /follows"
+    ),
+    "tv": (
+        "🔍 /tv — Bot ထဲကနေ series ရှာပြီး follow လုပ်\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /tv <series နာမည်>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /tv Lioness\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• website သွားစရာမလို — bot ထဲမှာပဲ ရှာပြီး ရွေးရုံ\n"
+        "• ရွေးပြီးရင် episode အသစ်ထွက်တိုင်း auto-download (မိနစ် ၃၀ တစ်ခါစစ်)\n"
+        "• episode တစ်ခုကို 1080p တစ်ဖိုင်ပဲ ဒေါင်းမယ်"
+    ),
+    "search": (
+        "🔎 /search — Torrent အကုန် ရှာပြီး ဒေါင်း\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /search <ရှာချင်တဲ့စာသား>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /search dune part 2 1080p\n"
+        "  /search abbey road flac\n\n"
+        "မှတ်ချက် / Note:\n"
+        "• movie / music / series / software — အကုန်ရှာလို့ရ\n"
+        "• seeders များတာကို အရင်ပြမယ် — ရွေးရင် တန်းဒေါင်းပေးမယ်"
     ),
     "drivestatus": (
         "☁️ /drivestatus — Google Drive upload status\n\n"
@@ -1213,8 +1241,137 @@ async def follows_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📡 Follow လုပ်ထားတာ မရှိသေးပါ.\n/follow <rss-url> [name] နဲ့ ထည့်ပါ.")
         return
-    lines = [f"• {v['name']}\n  {v['rss_url']}" for v in fl.values()]
+    lines = []
+    for v in fl.values():
+        src = "🔍 TV" if v.get("kind") == "eztv" else "📡 RSS"
+        url = v.get("rss_url") or f"EZTV ({v.get('imdb_id')})"
+        lines.append(f"• {v['name']} [{src}]\n  {url}")
     await update.message.reply_text("📡 **Follow list:**\n" + "\n".join(lines))
+
+
+# ------------------------------------------------- in-bot series search (/tv)
+async def tv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ် (TVMaze+EZTV)."""
+    if not allowed(update):
+        return
+    query = " ".join(context.args or []).strip()
+    if not query:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /tv <series နာမည်>\n"
+            "ဥပမာ: /tv Lioness\n"
+            "တွေ့တဲ့ series ကို ရွေးရင် episode အသစ်ထွက်တိုင်း\n"
+            "auto-download လုပ်ပေးမယ် — website သွားစရာမလို.")
+        return
+    status = await update.message.reply_text(f"🔍 \"{query}\" ရှာနေပါတယ်...")
+    try:
+        results = await asyncio.to_thread(tvmaze_search, query)
+    except Exception as e:
+        await status.edit_text(f"❌ ရှာမရပါ: {e}")
+        return
+    results = results[:8]
+    if not results:
+        await status.edit_text("❌ ဒီနာမည်နဲ့ series မတွေ့ပါ.")
+        return
+    kb = [[InlineKeyboardButton(
+        f"{r['name']}{(' (' + r['year'] + ')') if r['year'] else ''}",
+        callback_data=f"tv:{r['tvmaze_id']}")] for r in results]
+    await status.edit_text(
+        "🔍 တွေ့တဲ့ series — follow လုပ်ချင်တာ ရွေးပါ:",
+        reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def tv_pick(q, tvmaze_id: int):
+    """Inline button -> EZTV follow တစ်ခု ထည့်."""
+    uid = q.from_user.id
+    try:
+        await q.edit_message_text("📡 series အချက်အလက် ယူနေပါတယ်...")
+    except Exception:
+        pass
+    try:
+        show = await asyncio.to_thread(tvmaze_show, tvmaze_id)
+    except Exception as e:
+        try:
+            await q.edit_message_text(f"❌ series ဖတ်မရပါ: {e}")
+        except Exception:
+            pass
+        return
+    imdb = show.get("imdb_id")
+    name = show.get("name") or "?"
+    if show.get("year"):
+        name = f"{name} ({show['year']})"
+    if not imdb:
+        try:
+            await q.edit_message_text(
+                f"❌ **{name}** — IMDb ID မရှိလို့ follow လုပ်မရပါ.")
+        except Exception:
+            pass
+        return
+    try:
+        items = await asyncio.to_thread(fetch_eztv_items, imdb)
+    except Exception as e:
+        try:
+            await q.edit_message_text(f"❌ episode list ဖတ်မရပါ: {e}")
+        except Exception:
+            pass
+        return
+    if not items:
+        try:
+            await q.edit_message_text(f"ℹ️ **{name}** — torrent မရှိသေးပါ.")
+        except Exception:
+            pass
+        return
+    seen = {it["guid"]: MAX_ATTEMPTS for it in items}  # လက်ရှိတွေကို ကျော်
+    follows.add_eztv(uid, name, imdb, tvmaze_id, q.message.chat_id, seen)
+    try:
+        await q.edit_message_text(
+            f"✅ follow လုပ်ပြီးပါပြီ: **{name}**\n"
+            f"🆕 episode အသစ်ထွက်ရင် auto-download လုပ်ပေးမယ်.")
+    except Exception:
+        pass
+
+
+# ------------------------------------------------- general torrent search
+async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/search <text> — torrent မှာ ရှိသမျှ ရှာ (movie/music/series/software)."""
+    if not allowed(update):
+        return
+    query = " ".join(context.args or []).strip()
+    if not query:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /search <ရှာချင်တဲ့စာသား>\n"
+            "ဥပမာ: /search dune part 2 1080p\n"
+            "ဥပမာ: /search abbey road flac")
+        return
+    status = await update.message.reply_text(f"🔍 \"{query}\" ရှာနေပါတယ်...")
+    try:
+        results = await asyncio.to_thread(apibay_search, query)
+    except Exception as e:
+        await status.edit_text(f"❌ ရှာမရပါ: {e}")
+        return
+    results = results[:8]
+    if not results:
+        await status.edit_text("❌ ဒါနဲ့ကိုက်တဲ့ torrent မတွေ့ပါ.")
+        return
+    kb = []
+    for r in results:
+        label = r["name"][:42]
+        label += f" ({fmt_size(r['size'])}, 🌱{r['seeders']})"
+        kb.append([InlineKeyboardButton(
+            label, callback_data=f"dl:{r['info_hash']}")])
+    await status.edit_text(
+        "🔍 တွေ့တဲ့ torrent — ဒေါင်းချင်တာ ရွေးပါ (seeders များတာကို အရင်ပြ):",
+        reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def dl_pick(q, info_hash: str):
+    """Inline button -> magnet တစ်ခု ဒေါင်း (ပုံမှန် torrent pipeline)."""
+    uid = q.from_user.id
+    magnet = f"magnet:?xt=urn:btih:{info_hash}"
+    try:
+        msg = await q.edit_message_text("🧲 torrent ဒေါင်းနေပါတယ်...")
+    except Exception:
+        msg = q.message
+    await run_torrent(msg, uid, q.message.chat_id, magnet, True, status=msg)
 
 
 def _fetch_bytes(url: str, timeout: int = 60) -> bytes:
@@ -1226,19 +1383,27 @@ def _fetch_bytes(url: str, timeout: int = 60) -> bytes:
 
 
 async def follow_job(context: ContextTypes.DEFAULT_TYPE):
-    """30 မိနစ်တစ်ခါ: follow လုပ်ထားတဲ့ RSS feed တွေမှာ episode အသစ် စစ်မယ်."""
+    """30 မိနစ်တစ်ခါ: follow လုပ်ထားတဲ့ source တွေမှာ episode အသစ် စစ်မယ်."""
     for uid, feeds in follows.all().items():
         if not allowed_uid(uid):
             continue
         for fid, f in feeds.items():
+            kind = f.get("kind", "rss")
             try:
-                items = await asyncio.to_thread(fetch_items, f["rss_url"])
+                if kind == "eztv":
+                    items = await asyncio.to_thread(
+                        fetch_eztv_items, f["imdb_id"])
+                else:
+                    items = await asyncio.to_thread(
+                        fetch_items, f["rss_url"])
             except Exception as e:
-                print(f"📡 follow poll failed {f['rss_url']}: {e}")
+                print(f"📡 follow poll failed {f.get('name')}: {e}")
                 continue
             fresh = new_items(f, items)
             if not fresh:
                 continue
+            if kind == "eztv":
+                fresh = select_releases(fresh)  # episode တစ်ခုကို တစ်ဖိုင်ပဲ
             for it in reversed(fresh):  # အဟောင်းကနေ အသစ်ဆီ
                 link = it["link"]
                 if not is_torrent_link(link):
@@ -1339,6 +1504,14 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     if not allowed(update):
+        return
+    m = re.fullmatch(r"tv:(\d+)", q.data or "")
+    if m:
+        await tv_pick(q, int(m.group(1)))
+        return
+    m = re.fullmatch(r"dl:([0-9a-f]{40})", q.data or "")
+    if m:
+        await dl_pick(q, m.group(1))
         return
     m = re.fullmatch(r"drive:(up|no):([0-9a-f]+)", q.data or "")
     if m:
@@ -2491,10 +2664,13 @@ def main():
         ("ytcheck", ytcheck_cmd),
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
         ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
+        ("tv", tv_cmd),
+        ("search", search_cmd),
         ("drivestatus", drivestatus_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^q:(low|high):"))
+    app.add_handler(CallbackQueryHandler(
+        on_button, pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,

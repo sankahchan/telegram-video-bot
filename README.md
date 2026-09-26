@@ -37,6 +37,8 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 🛡️ **Download integrity check** — every web video is ffprobe-verified after download (truncated/corrupt files are auto-retried, never silently sent); soundless videos get a silent audio track so Telegram shows them as video instead of GIF
 - 🎞️ **H.264 normalization** — Instagram/YouTube serve VP9/AV1 which iOS Telegram can't decode (frozen frame + audio). Web videos are normalized to H.264 + AAC + faststart before sending; H.264 sources are stream-copied (no re-encode)
 - 🧲 **Torrents** — send a magnet link or upload a `.torrent` file; the bot fetches metadata, picks the largest video file, and downloads it via aria2c (seeding disabled, ~2GB Telegram cap)
+- 🔎 **`/search <text>`** — search torrents in-bot (movies / music / series / software via TPB index); tap a result to download, sorted by seeders
+- 🔍 **`/tv <series name>`** — search series in-bot (TVMaze) and follow it; new episodes auto-download via EZTV (1080p preferred, every 30 min). `/follow <rss-url>` also still works (e.g. showRSS feeds)
 
 > ⚠️ **Torrent note:** some VPS providers prohibit torrent traffic (copyright complaints can get the VPS suspended) and torrenting shares bandwidth with other services on the box. Seeding is disabled by the bot (`--seed-time=0`), but prefer legal torrents.
 
