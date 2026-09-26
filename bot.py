@@ -57,7 +57,8 @@ from web_download import (  # noqa: E402
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux, ios_container_ok  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
-from filehost import detect_filehost  # noqa: E402
+from filehost import (detect_filehost, is_drive_url,  # noqa: E402
+                      FileHostError, PERMANENT_KINDS)
 from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 from torrent_download import (  # noqa: E402
     is_magnet, extract_magnets, have_aria2, fetch_magnet_metadata,
@@ -3732,7 +3733,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             f"❌ {tag} " + quota_block_msg(used_q, quota_q))
                         fail += 1
                         continue
-                    if looks_like_direct_file(url):
+                    if looks_like_direct_file(url) and not detect_filehost(url):
                         path, title = await download_direct_file(
                             url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
                         wk = direct_file_kind(url)
@@ -3741,9 +3742,10 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             path, title = await download_web(
                                 url, tmpdir, quality=quality or s["quality"],
                                 progress_cb=web_progress, loop=loop, tag=tag)
-                            # file hosts return arbitrary files — kind by
-                            # extension so zips/docs send correctly
-                            wk = (direct_file_kind(path) if detect_filehost(url)
+                            # file hosts / Drive return arbitrary files — kind
+                            # by extension so zips/docs send correctly
+                            wk = (direct_file_kind(path)
+                                  if (detect_filehost(url) or is_drive_url(url))
                                   else "video")
                         except Exception as e:
                             if "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__:
@@ -3771,12 +3773,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception as e:
                 traceback.print_exc()
                 fail += 1
-                friendly = friendly_web_error(e)
-                if friendly:
-                    await emsg.reply_text(friendly)
+                if isinstance(e, FileHostError):
+                    # bilingual message already — send as-is, no prefix
+                    await emsg.reply_text(e.message)
                 else:
-                    err = str(e)[:300]
-                    await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
+                    friendly = friendly_web_error(e)
+                    if friendly:
+                        await emsg.reply_text(friendly)
+                    else:
+                        err = str(e)[:300]
+                        await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
 
         # zip mode: everything into one archive
         if collected and s["zip"]:
@@ -4003,13 +4009,14 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                                 await deliver_cached(uid, it["chat_id"], hit, url)
                                 print(f"⚡ night web cache hit -> {uid}")
                                 continue
-                        if looks_like_direct_file(url):
+                        if looks_like_direct_file(url) and not detect_filehost(url):
                             path, title = await download_direct_file(url, tmpdir)
                             wk = direct_file_kind(url)
                         else:
                             path, title = await download_web(
                                 url, tmpdir, quality=nq)
-                            wk = (direct_file_kind(path) if detect_filehost(url)
+                            wk = (direct_file_kind(path)
+                                  if (detect_filehost(url) or is_drive_url(url))
                                   else "video")
                         pp_notes: list = []
                         final, as_audio = await post_process(
@@ -4026,7 +4033,16 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                         pass
                 except Exception as e:
                     print(f"⚠️ night queue item failed: {e}")
-                    remaining.append(it)
+                    if (isinstance(e, FileHostError)
+                            and e.kind in PERMANENT_KINDS):
+                        # permanent failure (dead link, folder link, no key…)
+                        # — tell the user once, don't retry every night
+                        try:
+                            await bot_client.send_message(it["chat_id"], e.message)
+                        except Exception:
+                            pass
+                    else:
+                        remaining.append(it)
     night_q.replace(remaining)
 
 

@@ -63,8 +63,9 @@ _wd = types.ModuleType("web_download")
 _wd.download_direct_file = _fake_ddf
 sys.modules["web_download"] = _wd
 
-import filehost
-from filehost import (detect_filehost, download_filehost, FileHostError,
+import filehost  # noqa: F401  (module import smoke test)
+from filehost import (detect_filehost, is_drive_url, download_filehost,
+                      FileHostError, PERMANENT_KINDS,
                       _mediafire_direct, _pcloud_direct, _mega_download,
                       _mega_size_mb)
 
@@ -104,6 +105,20 @@ check("detect youtube none",
 check("detect gdrive none (yt-dlp handles it)",
       detect_filehost("https://drive.google.com/file/d/1/view") is None)
 check("detect empty none", detect_filehost("") is None)
+check("detect tight: notmega doesn't match",
+      detect_filehost("https://notmega" + ".nz/file/abc") is None)
+check("detect tight: sub.mega matches",
+      detect_filehost("https://sub.mega" + ".nz/file/AbCdEfGh#k") == "mega")
+
+# 1b. drive detection + permanent kinds
+check("is_drive_url drive",
+      is_drive_url("https://drive.google.com/file/d/1/view") is True)
+check("is_drive_url docs",
+      is_drive_url("https://docs.google.com/document/d/1/edit") is True)
+check("is_drive_url youtube false",
+      is_drive_url("https://youtube.com/watch?v=1") is False)
+check("PERMANENT_KINDS",
+      PERMANENT_KINDS == {"folder", "no_key", "dead", "code", "too_big"})
 
 # 2. mediafire
 MF_HTML = ('<a id="downloadButton" '

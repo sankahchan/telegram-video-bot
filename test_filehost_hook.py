@@ -54,5 +54,22 @@ check("probe_size pcloud -> None",
       asyncio.run(wd.probe_size(
           "https://e.pcloud.link/publink/show?code=X")) is None)
 
+# FileHostError must propagate unwrapped (kind intact) so callers can
+# branch on it — e.g. the night queue skips permanent failures.
+async def fake_fh_boom(url, tmpdir, progress_cb=None, loop=None, tag="dd"):
+    raise fh.FileHostError("dead", "boom-msg")
+
+fh.download_filehost = fake_fh_boom
+with tempfile.TemporaryDirectory() as td:
+    try:
+        asyncio.run(wd.download_web(MEGA_URL, td))
+        check("FileHostError unwrapped", False)
+    except fh.FileHostError as e:
+        check("FileHostError unwrapped",
+              e.kind == "dead" and "boom-msg" in e.message)
+    except Exception as e:  # noqa: BLE001
+        check("FileHostError unwrapped", False)
+        print("  wrong exc:", type(e).__name__)
+
 print(f"hook: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

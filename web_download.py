@@ -241,7 +241,7 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = DIRECT_MAX_M
             if total and total > max_mb * 1048576:
                 raise RuntimeError(f"File ကြီးလွန်းပါတယ် ({total/1048576:.0f}MB > {max_mb}MB)")
             ct = resp.headers.get("Content-Type", "")
-            if "text/html" in ct:
+            if "text/html" in ct.lower():
                 # e.g. yt-dlp "Unsupported URL" fallback landing on a video
                 # watch page — never send the page HTML as file.bin
                 raise RuntimeError(
@@ -768,14 +768,12 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     # extractors for them, so they download directly instead. (Google Drive
     # needs no special case: yt-dlp ships a GoogleDrive extractor.)
     # v6.5.0
-    from filehost import (detect_filehost, download_filehost,
-                          FileHostError as _FileHostError)
+    from filehost import detect_filehost, download_filehost
     if detect_filehost(url):
-        try:
-            return await download_filehost(
-                url, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
-        except _FileHostError as e:
-            raise RuntimeError(e.message)
+        # FileHostError propagates unwrapped so callers can branch on
+        # e.kind (e.g. night queue skips permanent failures).
+        return await download_filehost(
+            url, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
 
     if audio_only:
         fmts = ["ba/b", "b"]

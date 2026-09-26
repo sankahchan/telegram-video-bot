@@ -15,6 +15,11 @@ _MAX_MB = 1900
 _MEGA_DOMAINS = ("mega" + ".nz", "mega" + ".co.nz")
 _MEGA_API = "https://g.api.mega" + ".co.nz/cs"
 
+# FileHostError kinds that will never succeed on retry (dead link, wrong
+# link shape, over the Telegram size cap...) — the night queue must tell
+# the user once instead of re-queueing these forever.
+PERMANENT_KINDS = {"folder", "no_key", "dead", "code", "too_big"}
+
 
 class FileHostError(Exception):
     def __init__(self, kind, message):
@@ -24,17 +29,27 @@ class FileHostError(Exception):
 
 
 def detect_filehost(url):
+    """Return 'mega' | 'mediafire' | 'pcloud', or None."""
     try:
         host = urllib.parse.urlparse(url or "").netloc.lower()
     except Exception:
         return None
-    if any(d in host for d in _MEGA_DOMAINS):
+    if any(host == d or host.endswith("." + d) for d in _MEGA_DOMAINS):
         return "mega"
     if "mediafire.com" in host:
         return "mediafire"
     if "pcloud" in host:
         return "pcloud"
     return None
+
+
+def is_drive_url(url):
+    """True for Google Drive / Docs share links (handled by yt-dlp)."""
+    try:
+        host = urllib.parse.urlparse(url or "").netloc.lower()
+    except Exception:
+        return False
+    return "drive.google.com" in host or "docs.google.com" in host
 
 
 # ---------------------------------------------------------------- MEGA
