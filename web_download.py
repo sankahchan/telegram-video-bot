@@ -448,13 +448,21 @@ _BOTWALL_MARKERS = (
 )
 
 
+def _norm_quotes(s: str) -> str:
+    """v6.3.4: YouTube's bot-wall message uses a Unicode curly apostrophe
+    (you’re, U+2019), not ASCII '. Normalize before matching markers."""
+    return (s.lower()
+            .replace("\u2018", "'").replace("\u2019", "'").replace("\u02bc", "'")
+            .replace("\u201c", '"').replace("\u201d", '"'))
+
+
 def _is_botwall_error(e: Exception) -> bool:
-    s = str(e).lower()
+    s = _norm_quotes(str(e))
     return any(m in s for m in _BOTWALL_MARKERS)
 
 
 def _retryable_yt_error(e: Exception) -> bool:
-    s = str(e).lower()
+    s = _norm_quotes(str(e))
     return any(k.lower() in s for k in _RETRYABLE_YT)
 
 

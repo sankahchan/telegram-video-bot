@@ -21,6 +21,7 @@ _httpx_stub.HTTPError = _HTTPError
 sys.modules["httpx"] = _httpx_stub
 
 import yt_fallback as yf  # noqa: E402  (httpx stubbed above for network-free tests)
+from web_download import _is_botwall_error, _retryable_yt_error  # noqa: E402
 
 PASS = []
 
@@ -209,5 +210,19 @@ check("re-exec happens after git pull",
       upd.index("git pull") < upd.index('exec bash "$0"'))
 check("service -u patch still present",
       "python -u" in upd and "daemon-reload" in upd)
+
+print(f"\nPASS: {len(PASS)} checks")
+
+# --- 11. v6.3.4: curly-apostrophe bot-wall message (U+2019) --------------------
+CURLY = ("ERROR: [youtube] EQmKsw80WrE: Sign in to confirm you\u2019re not a bot. "
+         "Use --cookies-from-browser or --cookies for the authentication.")
+check("botwall detected with curly apostrophe U+2019",
+      _is_botwall_error(Exception(CURLY)))
+check("curly bot-wall NOT treated as plain retryable",
+      not _retryable_yt_error(Exception(CURLY)))
+check("botwall still detected with ASCII apostrophe",
+      _is_botwall_error(Exception(CURLY.replace("\u2019", "'"))))
+check("non-botwall error not flagged",
+      not _is_botwall_error(Exception("ERROR: Video unavailable")))
 
 print(f"\nPASS: {len(PASS)} checks")
