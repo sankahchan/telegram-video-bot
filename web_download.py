@@ -16,6 +16,7 @@ import time
 
 from x_media import XMediaError, extract_x_media, is_x_url
 from tiktok_media import TikTokMediaError, extract_tiktok_media, is_tiktok_url
+from yt_fallback import youtube_fallback_url, FallbackError as _YTFallbackError
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(DATA_DIR, "cookies.txt")
@@ -821,6 +822,26 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         if tiktok_error is not None and tiktok_error.kind in (
                 "not_found", "private", "rate_limited"):
             raise RuntimeError(f"TIKTOK_MEDIA:{tiktok_error.kind}:{tiktok_error}")
+        # YouTube: yt-dlp is bot-walled on datacenter IPs ("Sign in to
+        # confirm you're not a bot" / storyboard-only formats) — try the
+        # Cobalt -> Piped -> Invidious fallback chain before giving up.
+        if _is_youtube(url):
+            try:
+                media_url, title, src = await asyncio.to_thread(
+                    youtube_fallback_url, url, audio_only, quality)
+                print(f"✅ YouTube fallback via {src} — direct download")
+                path, _t = await download_direct_file(
+                    media_url, tmpdir, progress_cb=progress_cb,
+                    loop=loop, tag=tag)
+                ok, reason = await asyncio.to_thread(verify_web_video, path)
+                if not ok:
+                    raise _YTFallbackError(
+                        f"fallback file failed verify: {reason}")
+                if not audio_only:
+                    path = await asyncio.to_thread(normalize_web_video, path)
+                return path, title
+            except Exception as fe:
+                print(f"⚠️ YouTube fallback chain failed: {fe}")
         # every client failed — diagnose the real cause
         diag = await _diagnose_formats(url)
         raise RuntimeError(

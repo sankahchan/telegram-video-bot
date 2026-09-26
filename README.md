@@ -100,6 +100,25 @@ Get `BOT_TOKEN`: [@BotFather](https://t.me/BotFather) → /newbot
 | `DOWNLOAD_WORKERS` | Parallel download connections (default 8) |
 | `POT_PROVIDER_URL` | YouTube PO-token provider server (optional, default `http://127.0.0.1:4416`) |
 | `YTDLP_PROXY` | Proxy for yt-dlp downloads (optional, e.g. `socks5://user:pass@host:port`) |
+| `COBALT_API_URL` / `COBALT_API_KEY` | Self-hosted cobalt API for the YouTube fallback chain (optional) |
+
+### YouTube fallback chain: Cobalt → Piped → Invidious (v6.3.0, automatic)
+
+When yt-dlp is blocked by YouTube's bot-check on datacenter IPs, the bot
+automatically tries third-party frontends running on non-flagged IPs:
+
+1. **Cobalt** — only if `COBALT_API_URL` is set (self-hosted instance):
+   ```bash
+   docker run -d --name cobalt -p 127.0.0.1:9000:9000 ghcr.io/imput/cobalt:latest
+   ```
+   then `COBALT_API_URL=http://127.0.0.1:9000/` (and `COBALT_API_KEY=` if your
+   instance needs one).
+2. **Piped** — public API instances, auto-discovered (no setup).
+3. **Invidious** — public API instances, auto-discovered (no setup).
+
+The resolved file is verified and normalized (H.264) exactly like a normal
+download. This is how big public downloader bots stay working — no proxy
+needed, though success isn't 100% guaranteed as public instances fluctuate.
 
 ### YouTube PO-token provider (optional)
 
