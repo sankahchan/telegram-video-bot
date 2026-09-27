@@ -5170,6 +5170,11 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        # v6.12.0: process updates concurrently — PTB's default is
+        # strictly one-by-one, so one user's slow download blocked EVERYONE
+        # (even the ❌ cancel button). All shared state is uid/token-keyed
+        # and store writes are atomic+sync, so concurrency is safe here.
+        .concurrent_updates(True)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
