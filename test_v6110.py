@@ -147,9 +147,13 @@ orig_resolve = wd._resolve_embeds
 orig_tape = wd._tape_variants
 orig_verify = wd.verify_web_video
 orig_norm = wd.normalize_web_video
+orig_probe = wd._hls_first_segment_ok
 yt_dlp.YoutubeDL = FakeYDL
 wd.verify_web_video = lambda p: (True, "")
 wd.normalize_web_video = lambda p: p
+# v6.13.0: the HLS segment probe does real network — stub it here so the
+# candidate-order tests stay offline (covered for real in test_v6130.py)
+wd._hls_first_segment_ok = lambda url: True
 wd._tape_variants = lambda url: [url]  # isolate candidate-order tests
 try:
     async def fake_resolve(url):
@@ -215,6 +219,7 @@ finally:
     wd._tape_variants = orig_tape
     wd.verify_web_video = orig_verify
     wd.normalize_web_video = orig_norm
+    wd._hls_first_segment_ok = orig_probe
 
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

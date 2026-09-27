@@ -94,10 +94,15 @@ orig_fetch = wd._fetch_html
 orig_ydl = yt_dlp.YoutubeDL
 orig_verify = wd.verify_web_video
 orig_norm = wd.normalize_web_video
+orig_probe = wd._hls_first_segment_ok
 wd._fetch_html = fake_fetch
 yt_dlp.YoutubeDL = FakeYDL
 wd.verify_web_video = lambda p: (True, "")
 wd.normalize_web_video = lambda p: p
+# v6.13.0: the HLS segment probe does real network — stub it so the
+# ordering simulation stays offline (the probe itself is covered in
+# test_v6130.py against a local HTTP server)
+wd._hls_first_segment_ok = lambda url: True
 try:
     url = "https://javhd.icu/video/jav-hd-uncensored-leaked-jur-466-nanami-tina/?tape=2"
     path, title = asyncio.run(wd.download_web(url, tmp))
@@ -108,11 +113,28 @@ try:
     # tape variants order: pasted first
     tv = wd._tape_variants(url)
     check("pasted tape first", tv[0] == url and len(tv) == 3, tv)
+
+    # v6.13.0: dead HLS (placeholder segments, e.g. turbovid PNGs) is
+    # dropped BEFORE yt-dlp runs — fail fast with a clear bilingual error
+    # instead of a long doomed download + unplayable file.
+    async def fake_resolve_dead(url):
+        return (["https://cdn.example.com/dead.m3u8"], [])
+    wd._resolve_embeds = fake_resolve_dead
+    wd._hls_first_segment_ok = lambda url: False
+    calls.clear()
+    try:
+        asyncio.run(wd.download_web("https://example.com/videopage", tmp))
+        check("dead HLS raises", False, "no exception")
+    except RuntimeError as e:
+        check("dead HLS raises bilingual block error",
+              "block" in str(e).lower(), str(e)[:80])
+    check("yt-dlp never called for dead HLS", calls == [], calls)
 finally:
     wd._fetch_html = orig_fetch
     yt_dlp.YoutubeDL = orig_ydl
     wd.verify_web_video = orig_verify
     wd.normalize_web_video = orig_norm
+    wd._hls_first_segment_ok = orig_probe
 
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

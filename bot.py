@@ -895,6 +895,10 @@ def friendly_web_error(e: Exception) -> str | None:
             "cookies.txt\" extension, and upload it as cookies_tiktok.txt "
             "(or cookies.txt) under /opt/tg-video-bot/, then resend the link."
         )
+    # v6.13.0: internal errors that already carry a bilingual ❌ message
+    # (e.g. blocked-HLS-source) are delivered as-is, no wrapper prefix.
+    if s.startswith("❌"):
+        return s
     return None
 
 
@@ -2155,6 +2159,38 @@ _WATCH_SOURCES: dict = {}  # (uid, wkey) -> {sources,sizes,title,media_type,
 _WATCH_TTL = 600
 
 
+async def _pick_watch_server(embeds, try_server, progress_cb=None,
+                             batch: int = 4):
+    """Probe watch-page servers in parallel batches, cascade priority kept.
+
+    embeds: [(server_name, embed_url), ...] in priority order.
+    try_server: async fn(item) -> (server_name, status, payload) with
+        status in {"ok", "dead", "unsupported"}.
+    progress_cb: async fn(done_count, total) — status updates between batches.
+    Returns (payload_or_None, skipped, unsupported).
+    v6.13.0: replaces the sequential loop that froze the status for 6+
+    minutes (14 x 25s timeouts) on "watch page ဖတ်နေပါတယ်...".
+    """
+    skipped, unsupported = [], []
+    for bi in range(0, len(embeds), batch):
+        group = embeds[bi:bi + batch]
+        if progress_cb is not None:
+            try:
+                await progress_cb(bi + len(group), len(embeds))
+            except Exception:
+                pass
+        results = await asyncio.gather(*[try_server(it) for it in group])
+        # gather preserves order -> first healthy in server order wins
+        for server_name, st, payload in results:
+            if st == "ok":
+                return payload, skipped, unsupported
+            elif st == "unsupported":
+                unsupported.append(server_name)
+            else:
+                skipped.append(server_name)
+    return None, skipped, unsupported
+
+
 async def _watch_offer(uid: int, chat_id: int, watch_url: str,
                        season=None, episode=None, status_msg=None):
     """Resolve a free-streaming watch page (andyday.sx ...) to provider
@@ -2194,30 +2230,46 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
         skipped, unsupported = [], []
         client = httpx.Client(headers={"User-Agent": WATCH_UA}, timeout=25,
                               follow_redirects=True, trust_env=False)
+
+        async def _try_server(item):
+            """Probe one server: extract + size-probe its sources.
+
+            Returns (server_name, status, payload) where status is one of
+            "ok" / "dead" / "unsupported".
+            """
+            server_name, embed_url = item
+            try:
+                plabel, psources = await asyncio.to_thread(
+                    extract_embed_sources, embed_url, client)
+            except WatchError as e:
+                return (server_name,
+                        "unsupported" if e.kind == "unsupported" else "dead",
+                        None)
+            probe_list = psources[:_STREAM_PROBE_LIMIT]
+            psizes = await asyncio.gather(
+                *[asyncio.to_thread(probe_source_size, s)
+                  for s in probe_list])
+            kept, ksizes, pdrop = filter_oversize(probe_list, list(psizes))
+            if kept and not provider_looks_dead(ksizes):
+                return (server_name, "ok", (plabel, kept, ksizes, pdrop))
+            return (server_name, "dead", None)
+
         try:
-            for server_name, embed_url in embeds:
+            # v6.13.0: probe servers in parallel batches via _pick_watch_server
+            # (httpx.Client is thread-safe, shared across probe threads).
+            async def _progress(done, total):
                 try:
-                    plabel, psources = await asyncio.to_thread(
-                        extract_embed_sources, embed_url, client)
-                except WatchError as e:
-                    if e.kind == "unsupported":
-                        unsupported.append(server_name)
-                    else:
-                        skipped.append(server_name)
-                    continue
-                probe_list = psources[:_STREAM_PROBE_LIMIT]
-                psizes = await asyncio.gather(
-                    *[asyncio.to_thread(probe_source_size, s)
-                      for s in probe_list])
-                kept, ksizes, pdrop = filter_oversize(probe_list, list(psizes))
-                if kept and provider_looks_dead(ksizes):
-                    skipped.append(server_name)
-                    continue
-                if kept:
-                    label, sources, sizes, dropped = \
-                        plabel, kept, ksizes, pdrop
-                    break
-                skipped.append(server_name)
+                    await status_msg.edit_text(
+                        f"{tag} 🔍 server {done}/{total} စမ်းနေပါတယ်...")
+                except Exception:
+                    pass
+
+            found, bskipped, bun = await _pick_watch_server(
+                embeds, _try_server, _progress)
+            skipped.extend(bskipped)
+            unsupported.extend(bun)
+            if found is not None:
+                label, sources, sizes, dropped = found
         finally:
             client.close()
         if sources is None:

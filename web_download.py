@@ -646,6 +646,18 @@ def verify_web_video(path: str) -> tuple:
                 nfs = 0
             if nfs <= 1:
                 return False, "video has no decodable frames"
+        # v6.13.0: a container with (near-)zero duration but a non-trivial
+        # file size is not a video — e.g. HLS hosts that serve placeholder
+        # images instead of segments produce a 0:00 "mp4" that slipped
+        # through as ok. Reject it so it never gets delivered.
+        if cdur <= 1:
+            try:
+                fsize = os.path.getsize(path)
+            except OSError:
+                fsize = 0
+            if fsize > 102400:
+                return False, (f"no playable duration "
+                               f"({cdur:.1f}s, {fsize // 1024}KB)")
         return True, "ok"
     except Exception as e:
         # checker itself failed — don't punish the download
@@ -778,6 +790,70 @@ async def _fetch_html(url: str,
         if "html" not in r.headers.get("content-type", ""):
             return ""
         return r.text
+
+
+def _hls_first_segment_ok(m3u8_url: str) -> bool:
+    """Blocking: does this HLS playlist actually serve video segments?
+
+    Some hosts (e.g. Drive-backed HLS like turbovid's) serve placeholder
+    images / 429 HTML to datacenter IPs instead of video data. A full
+    yt-dlp run then "succeeds" but produces an unplayable 0:00 file.
+    Probe: fetch playlist (one master->variant hop), Range-GET the first
+    bytes of the first media segment, require video magic bytes.
+    Runs in a thread via asyncio.to_thread.
+    """
+    from urllib.parse import urljoin
+    try:
+        h = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "Chrome/126.0"}
+        with httpx.Client(headers=h, timeout=15, follow_redirects=True,
+                          trust_env=False) as c:
+            r = c.get(m3u8_url)
+            if r.status_code != 200 or not r.text.strip():
+                return False
+            txt = r.text
+            if "#EXT-X-STREAM-INF" in txt:  # master -> first variant
+                var = next((ln.strip() for ln in txt.splitlines()
+                            if ln.strip() and not ln.strip().startswith("#")),
+                           None)
+                if not var:
+                    return False
+                r = c.get(urljoin(m3u8_url, var))
+                if r.status_code != 200:
+                    return False
+                txt = r.text
+            seg = next((ln.strip() for ln in txt.splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")),
+                       None)
+            if not seg:
+                return False
+            seg_url = urljoin(str(r.url), seg)
+            h2 = dict(h)
+            h2["Range"] = "bytes=0-2047"
+            with c.stream("GET", seg_url, headers=h2) as rs:
+                if rs.status_code in (403, 429):
+                    return False
+                ct = (rs.headers.get("content-type") or "").lower()
+                if ct.startswith("image/") or "text/html" in ct:
+                    return False
+                head = b""
+                try:
+                    for chunk in rs.iter_bytes(2048):
+                        head += chunk
+                        break
+                except Exception:
+                    pass
+                if not head:
+                    return False
+                if head[:1] == b"\x47":  # MPEG-TS sync byte
+                    return True
+                if b"ftyp" in head[:32]:  # fragmented MP4 init
+                    return True
+                if ct.startswith("video/"):
+                    return True
+                return False
+    except Exception:
+        return False
 
 
 async def _resolve_embeds(url: str) -> "tuple[list[str], list[str]]":
@@ -969,6 +1045,31 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             for u in embeds:
                 if u not in all_embeds:
                     all_embeds.append(u)
+        # v6.13.0: validate HLS candidates before the expensive yt-dlp run —
+        # some HLS hosts serve placeholder images / 429s to datacenter IPs
+        # instead of segments, which "downloads" into an unplayable 0:00 file.
+        # Drop those playlists now so the bot fails fast with a clear error
+        # instead of delivering garbage after a long download.
+        if all_media:
+            live: "list[str]" = []
+            for m in all_media:
+                if m.lower().split("?")[0].endswith(".m3u8"):
+                    ok = await asyncio.to_thread(_hls_first_segment_ok, m)
+                    print(f"{'✅' if ok else '⛔'} HLS segment probe "
+                          f"{m[:70]}", flush=True)
+                    if ok:
+                        live.append(m)
+                else:
+                    live.append(m)
+            dropped_n = len(all_media) - len(live)
+            all_media = live
+            if dropped_n and not all_media and not all_embeds:
+                raise RuntimeError(
+                    "❌ video source က download block လုပ်ထားပါတယ် "
+                    "(server က video မပေးဘဲ အတုပဲပေးနေတယ်) — တခြား link/server "
+                    "စမ်းကြည့်ပါ.\n\n❌ The video host is blocking downloads "
+                    "from this server (it serves placeholder data instead of "
+                    "video) — try another link or server.")
         candidates = all_media + all_embeds + variants
     if not candidates:
         candidates = [url]
