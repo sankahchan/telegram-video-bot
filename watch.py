@@ -113,6 +113,16 @@ def _looks_like_loading_wall(html: str) -> bool:
     return _page_title(html).rstrip(".").lower() == "loading"
 
 
+def _looks_like_cf_challenge(html: str) -> bool:
+    """Cloudflare managed JS challenge — needs a real browser, plain HTTP
+    cannot pass it. Seen 2026-09-27 20:07 KST in the andyday.sx wall HTML
+    (challenge-platform/scripts/jsd/main.js + __CF$cvParams)."""
+    h = html or ""
+    return ("challenge-platform" in h or "__CF$cvParams" in h
+            or "cf-turnstile" in h
+            or "just a moment" in _page_title(h).lower())
+
+
 def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                        client=None, timeout: float = 20) -> tuple:
     """-> (title, [(server_name, embed_url)]). Blocking."""
@@ -132,8 +142,15 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
         # v6.13.2: retry against the "Loading..." wall with a shared cookie
         # session, and follow meta-refresh redirects — the real page is
         # served intermittently.
+        # v6.13.4: the wall's own JS does
+        #   document.cookie = "hv=1; path=/; max-age=86400; ...";
+        #   location.replace(location.href);
+        # Mirror it over plain HTTP: set hv=1, reload once. If Cloudflare
+        # then insists on its managed JS challenge (challenge-platform),
+        # plain HTTP cannot pass it — stop and report clearly.
         html = ""
         last_err = None
+        hv_tried = False
         for _ in range(3):
             try:
                 r = client.get(url, headers={"User-Agent": WATCH_UA},
@@ -152,6 +169,21 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                 url = urljoin(url, mr.group(1).strip())
                 continue
             if _looks_like_loading_wall(html):
+                if _looks_like_cf_challenge(html) and hv_tried:
+                    # Full Cloudflare managed challenge even after the hv=1
+                    # reload — needs a real browser. Stop retrying.
+                    break
+                if not hv_tried and "hv=1" in html:
+                    try:
+                        host = urlparse(url).netloc
+                        client.cookies.set("hv=1", "1", domain=host, path="/")
+                    except Exception:
+                        pass
+                    hv_tried = True
+                    time.sleep(2)
+                    continue
+                # Plain wall (no hv=1 script, no CF markers): the real page
+                # is served intermittently — keep the v6.13.2 retry.
                 time.sleep(5)
                 continue
             break
@@ -187,6 +219,16 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                       "ခဏ block ထားတာ ဖြစ်နိုင်ပါတယ်, ၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ.\n\n"
                       "❌ The site is showing a bot-check page — the VPS IP "
                       "may be temporarily blocked; try again in 10-15 minutes.")
+        elif _looks_like_cf_challenge(html):
+            # v6.13.4: Cloudflare managed JS challenge — the VPS has no
+            # browser, so it cannot be passed. It cleared on its own twice
+            # today (18:56, 19:17), so waiting usually works.
+            detail = ("❌ site က Cloudflare security check ပြနေပါတယ် — "
+                      "VPS မှာ browser မရှိလို့ ဒီ check ကို ကျော်မရပါ. "
+                      "၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ (ဒီနေ့ ၂ ခါ သူ့အလိုလို ပွင့်ခဲ့တယ်).\n\n"
+                      "❌ The site is showing a Cloudflare security check — "
+                      "the VPS has no browser to pass it. Try again in "
+                      "10-15 minutes (it cleared on its own twice today).")
         elif _looks_like_loading_wall(html):
             # v6.13.2: still walled after 3 retries
             detail = ("❌ site က 'Loading...' ပဲ ပြနေပါတယ် (3 ကြိမ် စမ်းပြီးပြီ) — "

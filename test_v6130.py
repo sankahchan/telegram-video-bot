@@ -433,6 +433,61 @@ def test_pick_watch_server_hung_probe_is_bounded():
     assert "hang" in skipped2, skipped2
 
 
+# ---- watch.py v6.13.4: hv=1 cookie trick + Cloudflare message -----------------
+class _CookieJar(dict):
+    def set(self, name, value, domain="", path="/"):
+        self[name] = (value, domain, path)
+
+
+class _HvClient(_SeqClient):
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.cookies = _CookieJar()
+
+
+_WALL_HV = ("<html><head><title>Loading...</title><script>"
+            '(function(){document.cookie = "hv=1; path=/; max-age=86400; '
+            'SameSite=Lax; Secure";'
+            'if (document.cookie.indexOf("hv=1") >= 0)'
+            ' { location.replace(location.href); } })();'
+            "</script></head><body>Loading...</body></html>")
+_WALL_CF = ("<html><head><title>Loading...</title><script>"
+            'document.cookie = "hv=1; path=/;";'
+            "window.__CF$cvParams={r:'abc'};</script>"
+            '<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js">'
+            "</script></head><body>Loading...</body></html>")
+
+
+def test_hv_cookie_trick_reloads_to_real_page():
+    from watch import fetch_watch_embeds
+    c = _HvClient([_WALL_HV, _REAL])
+    title, embeds = fetch_watch_embeds("https://andyday.sx/watch/tv-lioness-abc",
+                                       3, 3, client=c)
+    assert c.cookies.get("hv=1", (None,))[0] == "1", c.cookies
+    assert len(c.urls) == 2, c.urls
+    assert [u for _, u in embeds] == ["https://vidsrc.xyz/e/1"], embeds
+
+
+def test_cf_challenge_gives_clear_message():
+    from watch import fetch_watch_embeds, WatchError
+    c = _HvClient([_WALL_CF, _WALL_CF])
+    try:
+        fetch_watch_embeds("https://andyday.sx/watch/tv-lioness-abc",
+                           3, 3, client=c)
+        assert False, "should have raised"
+    except WatchError as e:
+        assert "Cloudflare" in e.message, e.message
+    # hv=1 tried once, then stopped early (no pointless 3rd retry)
+    assert len(c.urls) == 2, c.urls
+
+
+def test_looks_like_cf_challenge():
+    from watch import _looks_like_cf_challenge
+    assert _looks_like_cf_challenge(_WALL_CF) is True
+    assert _looks_like_cf_challenge(_WALL) is False
+    assert _looks_like_cf_challenge(_REAL) is False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_")]
