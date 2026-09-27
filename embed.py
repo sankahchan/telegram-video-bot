@@ -82,6 +82,85 @@ def pick_best(sources: list) -> dict | None:
     return sorted(sources, key=key)[0]
 
 
+def fmt_size(n) -> str:
+    """Human-readable file size; None -> '—'."""
+    if n is None:
+        return "—"
+    n = int(n)
+    if n < 1024:
+        return f"{n}B"
+    if n < 1048576:
+        return f"{n / 1024:.1f}KB".replace(".0KB", "KB")
+    if n < 1073741824:
+        return f"{n / 1048576:.1f}MB".replace(".0MB", "MB")
+    return f"{n / 1073741824:.1f}GB".replace(".0GB", "GB")
+
+
+def probe_source_size(source: dict, client=None, timeout: float = 10) -> int | None:
+    """Content-Length via HEAD (fallback: 1-byte Range GET). HLS -> None (skip).
+    Blocking — run in a thread. Pass an httpx.Client in tests."""
+    url = (source or {}).get("url") or ""
+    if not url or ".m3u8" in url.lower():
+        return None
+    headers = {"User-Agent": UA}
+    if source.get("referer"):
+        headers["Referer"] = source["referer"]
+    if source.get("origin"):
+        headers["Origin"] = source["origin"]
+    own = client is None
+    if own:
+        client = httpx.Client(headers={"User-Agent": UA}, timeout=timeout,
+                              follow_redirects=True, trust_env=False)
+    try:
+        try:
+            r = client.head(url, headers=headers, timeout=timeout)
+        except Exception:
+            return None
+        if r.status_code == 200:
+            cl = r.headers.get("content-length")
+            if cl and cl.isdigit():
+                return int(cl)
+        try:
+            h2 = dict(headers)
+            h2["Range"] = "bytes=0-0"
+            # stream: headers only, never read the body (a 200 may be gigabytes)
+            with client.stream("GET", url, headers=h2, timeout=timeout) as r2:
+                m = re.search(r"/(\d+)\s*$",
+                              r2.headers.get("content-range") or "")
+                if m:
+                    return int(m.group(1))
+                cl = r2.headers.get("content-length")
+                if r2.status_code == 200 and cl and cl.isdigit():
+                    return int(cl)
+        except Exception:
+            pass
+        return None
+    finally:
+        if own:
+            client.close()
+
+
+def stream_src_label(src: dict, size, is_best: bool = False) -> str:
+    """Button label for the quality+size picker, e.g. '⭐ 1080p • 1.4GB'."""
+    icon = "⭐" if is_best else "📥"
+    q = ((src.get("quality") or "auto").strip()) or "auto"
+    return f"{icon} {q} • {fmt_size(size)}"
+
+
+def filter_oversize(sources: list, sizes: list) -> tuple:
+    """Drop sources whose known size exceeds MAX_MB.
+    Returns (kept_sources, kept_sizes, dropped_count)."""
+    cap = MAX_MB * 1048576
+    kept, ksizes, dropped = [], [], 0
+    for s, z in zip(sources, sizes):
+        if z is not None and z > cap:
+            dropped += 1
+            continue
+        kept.append(s)
+        ksizes.append(z)
+    return kept, ksizes, dropped
+
+
 # (label, extractor) — first provider with sources wins
 CASCADE = [
     ("VidNest", EP.extract_vidnest),

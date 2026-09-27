@@ -1971,6 +1971,8 @@ async def tv_pick(q, tvmaze_id: int):
 # ------------------------------------------------- movie/series streaming (/stream, v6.8.0)
 _STREAM_TITLES: dict = {}   # (uid, tmdb_id) -> (title, media_type)
 _stream_pending: dict = {}  # uid -> {tmdb_id, title, chat_id, ts}
+_STREAM_SOURCES: dict = {}  # (uid, tmdb_id) -> {sources, sizes, title, media_type, season, episode, provider, ts}
+_STREAM_PROBE_LIMIT = 6     # max sources to probe for file size
 
 
 async def cmd_stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2029,15 +2031,107 @@ async def stream_pick(q, media_type: str, tmdb_id: int):
             "Enter season and episode (e.g. `1 2` = S1E2).",
             parse_mode="Markdown")
         return
-    await q.edit_message_text(f"🎬 **{title}** — stream ရှာနေပါတယ်...",
+    await q.edit_message_text(f"🎬 **{title}** — 🔍 stream ရှာနေပါတယ်...",
                               parse_mode="Markdown")
     asyncio.create_task(
-        _stream_download(uid, chat_id, tmdb_id, "movie", title, None, None, q.message))
+        _stream_offer(uid, chat_id, tmdb_id, "movie", title, None, None, q.message))
+
+
+async def _stream_offer(uid: int, chat_id: int, tmdb_id: int, media_type: str,
+                        title: str, season, episode, status_msg=None):
+    """Resolve provider streams, probe file sizes, show quality+size picker."""
+    from embed import (resolve_streams, probe_source_size, pick_best,
+                       stream_src_label, filter_oversize, fmt_size,
+                       EmbedError, MAX_MB)
+    tag = "🎬" if media_type == "movie" else "📺"
+    suffix = f" S{season}E{episode}" if media_type == "tv" else ""
+    # prune stale picker entries
+    now = time.time()
+    for k in [k for k, v in _STREAM_SOURCES.items()
+              if now - v.get("ts", 0) > 600]:
+        _STREAM_SOURCES.pop(k, None)
+    try:
+        if status_msg is None:
+            status_msg = await bot_client.send_message(
+                chat_id, f"{tag} 🔍 stream ရှာနေပါတယ်...")
+        else:
+            try:
+                await status_msg.edit_text(f"{tag} 🔍 stream ရှာနေပါတယ်...")
+            except Exception:
+                pass
+        label, sources = await asyncio.to_thread(
+            resolve_streams, tmdb_id, media_type, season, episode)
+        probe_list = sources[:_STREAM_PROBE_LIMIT]
+        sizes = await asyncio.gather(
+            *[asyncio.to_thread(probe_source_size, s) for s in probe_list])
+        kept, ksizes, dropped = filter_oversize(probe_list, list(sizes))
+        if not kept:
+            raise EmbedError(
+                "too_big",
+                f"❌ တွေ့တဲ့ stream အားလုံး ကြီးလွန်းပါတယ် (>{MAX_MB}MB).\n\n"
+                f"❌ All found streams exceed {MAX_MB}MB.")
+        best = pick_best(kept)
+        _STREAM_SOURCES[(uid, tmdb_id)] = {
+            "sources": kept, "sizes": ksizes, "title": title,
+            "media_type": media_type, "season": season, "episode": episode,
+            "provider": label, "ts": now}
+        kb = []
+        for i, (s, z) in enumerate(zip(kept, ksizes)):
+            kb.append([InlineKeyboardButton(
+                stream_src_label(s, z, s is best),
+                callback_data=f"sstream:{tmdb_id}:{i}")])
+        note = ""
+        if dropped:
+            cap_txt = fmt_size(MAX_MB * 1048576)
+            note = (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
+                    f"⚠️ {dropped} dropped (over {cap_txt}).")
+        try:
+            await status_msg.edit_text(
+                f"{tag} **{title}{suffix}**\n🔗 via {label}\n\n"
+                f"Quality + file size ရွေးပါ / pick one:{note}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb))
+        except Exception:
+            pass
+    except Exception as e:
+        traceback.print_exc()
+        msg = getattr(e, "message", None)
+        try:
+            await status_msg.edit_text(
+                msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
+async def sstream_pick(q, tmdb_id: int, idx: int):
+    """User picked a quality+size from the stream picker -> download it."""
+    uid = q.from_user.id
+    chat_id = q.message.chat_id
+    rec = _STREAM_SOURCES.get((uid, tmdb_id))
+    if not rec or idx >= len(rec["sources"]):
+        await q.answer("⏰ သက်တမ်းကုန်သွားပါပြီ — ပြန်ရွေးပေးပါ.\n\n"
+                       "⏰ Expired — please pick again.", show_alert=True)
+        return
+    src = rec["sources"][idx]
+    _STREAM_SOURCES.pop((uid, tmdb_id), None)
+    try:
+        await q.edit_message_text(
+            f"🎬 **{rec['title']}** — ⬇️ ဒေါင်းနေပါတယ်...",
+            parse_mode="Markdown")
+    except Exception:
+        pass
+    asyncio.create_task(_stream_download(
+        uid, chat_id, tmdb_id, rec["media_type"], rec["title"],
+        rec["season"], rec["episode"], q.message,
+        source=src, provider=rec["provider"]))
 
 
 async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str,
-                           title: str, season, episode, status_msg=None):
-    from embed import resolve_and_download
+                           title: str, season, episode, status_msg=None,
+                           source: dict | None = None, provider: str | None = None):
+    """Download a stream and deliver. If source/provider given (picker path),
+    skip resolving and download that source directly."""
+    from embed import resolve_and_download, download_embed
     tag = "🎬"
     try:
         if status_msg is None:
@@ -2059,10 +2153,15 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
                         pass
                 return lambda _tag, pct: _do(pct)
 
-            path, provider = await resolve_and_download(
-                tmdb_id, media_type, title, season, episode, tmpdir,
-                progress_cb=_mkprog(), loop=loop, tag=tag)
             suffix = f" S{season}E{episode}" if media_type == "tv" else ""
+            if source is None:
+                path, provider = await resolve_and_download(
+                    tmdb_id, media_type, title, season, episode, tmpdir,
+                    progress_cb=_mkprog(), loop=loop, tag=tag)
+            else:
+                path = await asyncio.to_thread(
+                    download_embed, source, f"{title}{suffix}", tmpdir,
+                    _mkprog(), loop, tag)
             caption = f"{tag} {title}{suffix}\n🔗 via {provider}"
             await status_msg.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
             await deliver(uid, chat_id, path, caption, "video", False, True,
@@ -3325,6 +3424,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m:
         await stream_pick(q, m.group(1), int(m.group(2)))
         return
+    m = re.fullmatch(r"sstream:(\d+):(\d+)", q.data or "")
+    if m:
+        await sstream_pick(q, int(m.group(1)), int(m.group(2)))
+        return
     m = re.fullmatch(r"dl:([0-9a-f]{40})", q.data or "")
     if m:
         await dl_pick(q, m.group(1))
@@ -4165,7 +4268,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await emsg.reply_text(
                 f"📺 **{pend['title']}** S{s_no}E{e_no} — stream ရှာနေပါတယ်...",
                 parse_mode="Markdown")
-            asyncio.create_task(_stream_download(
+            asyncio.create_task(_stream_offer(
                 uid, chat_id, pend["tmdb_id"], "tv", pend["title"],
                 s_no, e_no))
             return
@@ -4802,7 +4905,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
         on_button,
-        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|stream:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|sstream:|stream:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
