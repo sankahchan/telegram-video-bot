@@ -25,5 +25,6 @@ venv/
 /cookies_twitter.txt
 /fileid_cache.json
 /follows.json
+/deadwatch.json
 /token.json
 /client_secret.json

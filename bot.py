@@ -43,9 +43,11 @@ import datetime
 import time
 import uuid
 import secrets
+import threading
 from torrent_health import (  # noqa: E402
     extract_infohash, check_health, dead_torrent_warning,
 )
+from deadwatch import DeadWatchStore  # noqa: E402
 
 from dotenv import load_dotenv
 
@@ -67,7 +69,7 @@ from x_media import fetch_x_timeline, parse_timeline_args  # noqa: E402
 from torrent_download import (  # noqa: E402
     is_magnet, extract_magnets, have_aria2, fetch_magnet_metadata,
     torrent_files, pick_targets, download_torrent, check_torrent_size,
-    TorrentError, MAX_TORRENT_FILE_MB,
+    TorrentError, DownloadCancelled, MAX_TORRENT_FILE_MB,
 )
 from follow import (  # noqa: E402
     FollowStore, fetch_items, new_items, is_torrent_link, MAX_ATTEMPTS,
@@ -133,6 +135,7 @@ night_q = QueueStore()
 settings = SettingsStore()
 fcache = FileIdCache()  # URL -> Telegram file_id (instant repeat delivery)
 follows = FollowStore()  # torrent RSS auto-follow
+deadwatches = DeadWatchStore()  # dead-magnet seeder watchlist
 bookmarks = BookmarkStore()  # per-user saved links
 
 # In-memory pending states
@@ -1977,6 +1980,10 @@ def _search_sorted(results: list, mode: str) -> list:
 def _search_kb(key: str, results: list, mode: str):
     kb = [[
         InlineKeyboardButton(
+            "🎯 အကောင်းဆုံးရွေး",
+            callback_data=f"sbest:{key}"),
+    ], [
+        InlineKeyboardButton(
             "🌱 Seeders" + (" ✓" if mode == "seeders" else ""),
             callback_data=f"ssort:{key}:seeders"),
         InlineKeyboardButton(
@@ -2180,6 +2187,395 @@ async def thc_pick(q, token: str, yes: bool):
                       status=msg, convert=pend.get("convert"),
                       ask_convert=pend.get("ask_convert", False),
                       skip_health=True)
+
+
+# ------------------------------------------------- v6.7.0 torrent pack ----
+# --- /dl live dashboard ------------------------------------------------------
+_active_downloads: dict = {}  # token -> {uid, chat_id, name, total, done,
+                              #           started, cancel_event}
+
+
+def _dl_bar(pct: int, width: int = 10) -> str:
+    fill = min(width, max(0, int(pct / 100 * width)))
+    return "█" * fill + "░" * (width - fill)
+
+
+async def dl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/dl — ကိုယ့် active torrent download တွေ (%, speed, ETA) + cancel."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    mine = [(tok, e) for tok, e in _active_downloads.items()
+            if e["uid"] == uid]
+    if not mine:
+        await update.message.reply_text(
+            "📭 အခု ဒေါင်းနေတဲ့ torrent မရှိပါ.\nNo active torrent downloads.")
+        return
+    now = time.time()
+    lines = ["📊 Active downloads:\n"]
+    kb = []
+    for tok, e in mine:
+        total = e["total"] or 1
+        done = e["done"]
+        pct = min(100, int(done / total * 100))
+        el = max(1.0, now - e["started"])
+        speed = done / el
+        eta = (total - done) / speed if speed > 0 else -1
+        eta_s = f"{int(eta // 60)}m{int(eta % 60):02d}s" if eta >= 0 else "…"
+        lines.append(
+            f"{_dl_bar(pct)} {pct}%\n"
+            f"📦 {e['name'][:40]}\n"
+            f"{done / 1048576:.0f}/{total / 1048576:.0f}MB · "
+            f"{speed / 1048576:.1f}MB/s · ETA {eta_s}\n")
+        kb.append([InlineKeyboardButton(f"❌ {e['name'][:24]}",
+                                       callback_data=f"dlx:{tok}")])
+    await update.message.reply_text(
+        "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def dlx_pick(q, token: str):
+    """Cancel button on the /dl dashboard."""
+    uid = q.from_user.id
+    e = _active_downloads.get(token)
+    if e is None or e["uid"] != uid:
+        await q.answer("ဒီ download မရှိတော့ပါ / expired", show_alert=True)
+        return
+    e["cancel_event"].set()
+    await q.answer("⏹️ ပယ်ဖျက်နေပါတယ်...")
+
+
+# --- /search smart pick ------------------------------------------------------
+def _smart_score(r: dict) -> tuple:
+    """Best-release ranking: 1080p first (Chan's preference — 4K is often
+    over the Telegram size cap and slower), then WEB-DL/WEBRip/BluRay,
+    then most seeders."""
+    name = (r.get("name") or "").lower()
+    if "1080p" in name:
+        q = 2
+    elif "2160p" in name or "4k" in name:
+        q = 1
+    elif "720p" in name:
+        q = 0
+    else:
+        q = -1
+    web = 1 if any(k in name for k in (
+        "web-dl", "webdl", "webrip", "web-rip", "bluray", "blu-ray")) else 0
+    return (q, web, r.get("seeders", 0))
+
+
+async def sbest_pick(q, key: str):
+    """🎯 အကောင်းဆုံးရွေး — auto-pick the best /search result."""
+    uid = q.from_user.id
+    entry = _SEARCH_CACHE.get(key)
+    if not entry or entry["uid"] != uid:
+        await q.answer("ဒီ search က သင့်ဟာမဟုတ်ပါ / expired",
+                       show_alert=True)
+        return
+    results = entry.get("results") or []
+    if not results:
+        await q.answer("results မရှိပါ", show_alert=True)
+        return
+    best = max(results, key=_smart_score)
+    await dl_pick(q, best["info_hash"])
+
+
+# --- /totorrent: magnet -> .torrent file -------------------------------------
+async def totorrent_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/totorrent <magnet> — magnet ကနေ .torrent file ထုတ်ပေး."""
+    if not allowed(update):
+        return
+    text = " ".join(context.args or []).strip()
+    mags = extract_magnets(text)
+    if not mags:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /totorrent <magnet link>\n"
+            "ဥပမာ: /totorrent magnet:?xt=urn:btih:...")
+        return
+    magnet = _with_trackers(mags[0])
+    ih = extract_infohash(magnet) or "torrent"
+    status = await update.message.reply_text("🧲 metadata ရယူနေပါတယ်...")
+    ok = False
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tpath = await asyncio.to_thread(
+                fetch_magnet_metadata, magnet, tmpdir, 60)
+            fname = f"{ih}.torrent"
+            with open(tpath, "rb") as fh:
+                await update.message.reply_document(
+                    document=fh, filename=fname,
+                    caption="🧲 .torrent file အဆင်သင့် — "
+                            "တခြား torrent client မှာ သုံးလို့ရပြီ.")
+            ok = True
+    except TorrentError as e:
+        await _send_with_retry(status.edit_text, str(e))
+    except Exception as e:
+        await _send_with_retry(
+            status.edit_text, f"❌ မအောင်မြင်ပါ: {type(e).__name__}: {e}")
+    if ok:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+
+# --- /setminseeders ------------------------------------------------------------
+async def setminseeders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setminseeders <n> — follow auto-download: seeder n အောက်ဆို skip (0=off)."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    if not context.args:
+        cur = st(uid).get("min_seeders", 0)
+        await update.message.reply_text(
+            f"🌱 လက်ရှိ min seeders: {cur} (0 = off)\n"
+            f"အသုံးပြုပုံ: /setminseeders <နံပါတ်>\n"
+            f"ဥပမာ: /setminseeders 5")
+        return
+    try:
+        n = int(context.args[0])
+        if n < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ နံပါတ်ပဲထည့်ပါ (ဥပမာ: /setminseeders 5, ပိတ်ချင်ရင် 0)")
+        return
+    settings.set(uid, "min_seeders", n)
+    await update.message.reply_text(
+        f"✅ min seeders = {n}" + (" (off)" if n == 0 else
+        f"\n📡 follow auto-download: seeder {n} အောက်ဆို skip မယ်"))
+
+
+# --- /blacklist ------------------------------------------------------------------
+def _title_blacklisted(uid: int, title: str) -> str | None:
+    """Returns the matched blacklist word, or None.
+
+    Matches whole dot-separated tokens (scene release convention), so
+    'ts' skips 'Movie.2026.TS.x264' but NOT 'The.Sports.Show'.
+    """
+    words = [(w or "").lower().strip()
+             for w in st(uid).get("blacklist") or []]
+    words = [w for w in words if w]
+    if not words:
+        return None
+    tokens = set(re.split(r"[^a-z0-9]+", (title or "").lower()))
+    for w in words:
+        if w in tokens:
+            return w
+    return None
+
+
+async def blacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/blacklist — follow auto-download ကနေ ရှောင်မယ့် စာသားတွေ."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    args = list(context.args or [])
+    cur = list(st(uid).get("blacklist") or [])
+    if not args:
+        await update.message.reply_text(
+            "🏷️ blacklist: " + (", ".join(cur) if cur else "(empty)") +
+            "\nအသုံးပြုပုံ:\n/blacklist add cam ts\n"
+            "/blacklist del cam\n/blacklist reset")
+        return
+    sub = args[0].lower()
+    if sub == "add":
+        for w in args[1:]:
+            w = w.lower().strip()
+            if w and w not in cur:
+                cur.append(w)
+        settings.set(uid, "blacklist", cur)
+        await update.message.reply_text(
+            "✅ blacklist: " + (", ".join(cur) if cur else "(empty)"))
+    elif sub == "del":
+        drop = {w.lower().strip() for w in args[1:]}
+        cur = [w for w in cur if w.lower() not in drop]
+        settings.set(uid, "blacklist", cur)
+        await update.message.reply_text(
+            "✅ blacklist: " + (", ".join(cur) if cur else "(empty)"))
+    elif sub == "reset":
+        cur = ["cam", "ts", "hdcam", "hdts", "telesync"]
+        settings.set(uid, "blacklist", cur)
+        await update.message.reply_text(
+            "✅ blacklist reset: " + ", ".join(cur))
+    else:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /blacklist add|del|reset ...")
+
+
+async def _follow_skip_reason(uid: int, it: dict) -> str | None:
+    """Why a follow item should be auto-skipped, or None to download."""
+    title = it.get("title") or ""
+    hit = _title_blacklisted(uid, title)
+    if hit:
+        return f"🚫 blacklist: '{hit}'"
+    min_s = st(uid).get("min_seeders", 0) or 0
+    link = it.get("link") or ""
+    if min_s > 0 and link.startswith("magnet:"):
+        ih = extract_infohash(link)
+        if ih:
+            try:
+                h = await check_health(ih)
+            except Exception:
+                h = {"verdict": "unknown", "seeders": 0}
+            if h["verdict"] != "unknown" and h["seeders"] < min_s:
+                return (f"🌱 seeders {h['seeders']} < min {min_s}")
+    return None
+
+
+# --- dead-magnet watchlist -------------------------------------------------------
+async def watchdead_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/watchdead <magnet> — seeder မရှိတဲ့ magnet ကို စောင့်ကြည့်."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    text = " ".join(context.args or []).strip()
+    mags = extract_magnets(text)
+    if not mags:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /watchdead <magnet link>\n"
+            "seeder ပေါ်လာရင် notify + one-tap download လုပ်ပေးမယ်.")
+        return
+    magnet = _with_trackers(mags[0])
+    ih = extract_infohash(magnet)
+    if not ih:
+        await update.message.reply_text("❌ magnet မှာ infohash မတွေ့ပါ.")
+        return
+    status = await update.message.reply_text("🧲 seeder စစ်နေပါတယ်...")
+    try:
+        h = await check_health(ih)
+    except Exception as e:
+        await _send_with_retry(status.edit_text, f"❌ စစ်မရပါ: {e}")
+        return
+    if h["verdict"] == "alive":
+        await _send_with_retry(
+            status.edit_text,
+            f"✅ seeder {h['seeders']} ယောက်ရှိနေပြီ — တန်းဒေါင်းလို့ရတယ်.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬇️ အခုဒေါင်း",
+                                     callback_data=f"dl:{ih}")]]))
+        return
+    token = deadwatches.add(uid, chat_id, magnet, ih, ih[:12])
+    if token is None:
+        await _send_with_retry(
+            status.edit_text,
+            "❌ watchlist ပြည့်နေပြီ (အများဆုံး 20) / ဒါကို စောင့်ကြည့်နေပြီးသား.")
+        return
+    await _send_with_retry(
+        status.edit_text,
+        f"👀 စောင့်ကြည့်နေပါပြီ (အခု seeder: {h['seeders']}).\n"
+        f"Seeder ပေါ်လာရင် ချက်ချင်း notify လုပ်ပေးမယ်.\n\n"
+        f"👀 Watching for seeders (now: {h['seeders']}).\n"
+        f"I'll notify you the moment seeders appear.")
+
+
+async def deadwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/deadwatch — စောင့်ကြည့်နေတဲ့ dead magnet list."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    entries = deadwatches.list_for(uid)
+    if not entries:
+        await update.message.reply_text(
+            "👀 စောင့်ကြည့်နေတာ မရှိပါ.\n"
+            "အသုံးပြုပုံ: /watchdead <magnet link>")
+        return
+    lines = ["👀 Dead-magnet watchlist:\n"]
+    kb = []
+    for i, (tok, e) in enumerate(entries.items(), 1):
+        name = e.get("name") or e.get("infohash", "")[:12]
+        lines.append(f"{i}. 🧲 {name} · 🌱 last: {e.get('last_seeders', 0)}")
+        kb.append([InlineKeyboardButton(f"❌ {name[:24]}",
+                                       callback_data=f"dwdel:{tok}")])
+    await update.message.reply_text(
+        "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def unwatchdead_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/unwatchdead <နံပါတ်> — watch ဖြုတ်."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    entries = list(deadwatches.list_for(uid).items())
+    if not entries:
+        await update.message.reply_text("👀 စောင့်ကြည့်နေတာ မရှိပါ.")
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ: /unwatchdead <နံပါတ်>\n"
+            "(နံပါတ်ကို /deadwatch မှာ ကြည့်)")
+        return
+    try:
+        idx = int(context.args[0]) - 1
+        tok, e = entries[idx]
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ နံပါတ်မှားနေပါတယ်.")
+        return
+    deadwatches.remove(uid, tok)
+    await update.message.reply_text(
+        f"✅ ဖြုတ်လိုက်ပါပြီ: {(e.get('name') or '')[:40]}")
+
+
+async def dwdel_pick(q, token: str):
+    """❌ button on /deadwatch list."""
+    uid = q.from_user.id
+    if deadwatches.remove(uid, token):
+        await q.answer("✅ ဖြုတ်လိုက်ပြီ")
+    else:
+        await q.answer("ဒါ မရှိတော့ပါ / expired", show_alert=True)
+        return
+    entries = deadwatches.list_for(uid)
+    if not entries:
+        try:
+            await q.edit_message_text("👀 watchlist ရှင်းသွားပြီ.")
+        except Exception:
+            pass
+        return
+    lines = ["👀 Dead-magnet watchlist:\n"]
+    kb = []
+    for i, (tok, e) in enumerate(entries.items(), 1):
+        name = e.get("name") or e.get("infohash", "")[:12]
+        lines.append(f"{i}. 🧲 {name} · 🌱 last: {e.get('last_seeders', 0)}")
+        kb.append([InlineKeyboardButton(f"❌ {name[:24]}",
+                                       callback_data=f"dwdel:{tok}")])
+    try:
+        await q.edit_message_text("\n".join(lines),
+                                  reply_markup=InlineKeyboardMarkup(kb))
+    except Exception:
+        pass
+
+
+async def deadwatch_job(context: ContextTypes.DEFAULT_TYPE):
+    """30 မိနစ်တစ်ခါ: watchlist ထဲက magnet တွေမှာ seeder ပေါ်လာပြီလား စစ်."""
+    for uid_s, items in deadwatches.all().items():
+        try:
+            uid = int(uid_s)
+        except ValueError:
+            continue
+        if not allowed_uid(uid):
+            continue
+        for token, e in list(items.items()):
+            ih = e.get("infohash") or ""
+            try:
+                h = await check_health(ih)
+            except Exception as ex:
+                print(f"👀 deadwatch check failed {ih[:8]}: {ex}")
+                continue
+            deadwatches.touch(uid, token, h["seeders"])
+            if h["verdict"] == "alive":
+                deadwatches.remove(uid, token)
+                try:
+                    await context.bot.send_message(
+                        e["chat_id"],
+                        f"🌱 Seeder ပေါ်လာပြီ! ({h['seeders']} seeders)\n"
+                        f"🧲 {(e.get('name') or '')[:40]}\n"
+                        f"အခုဒေါင်းမလား?",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "⬇️ ဒေါင်း",
+                                callback_data=f"dl:{ih}")]]))
+                except Exception as ex:
+                    print(f"👀 deadwatch notify failed: {ex}")
 
 
 async def dl_pick(q, info_hash: str):
@@ -2419,6 +2815,13 @@ BOT_COMMANDS = [
     ("bookmarks", "🔖 သိမ်းထားတာတွေ"),
     ("quota", "📊 ကိုယ့် quota ကြည့်"),
     ("ytcheck", "▶️ YouTube စစ်"),
+    ("dl", "📊 active downloads + cancel"),
+    ("totorrent", "🧲 magnet → .torrent file"),
+    ("setminseeders", "🌱 follow min seeders"),
+    ("blacklist", "🏷️ follow blacklist"),
+    ("watchdead", "👀 dead magnet စောင့်ကြည့်"),
+    ("deadwatch", "👀 watch list ကြည့်"),
+    ("unwatchdead", "👀 watch ဖြုတ်"),
     ("help", "📖 အကူအညီ"),
 ]
 
@@ -2675,6 +3078,17 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
                 if not is_torrent_link(link):
                     follows.mark_seen(uid, fid, it["guid"])
                     continue
+                skip_reason = await _follow_skip_reason(uid, it)
+                if skip_reason:
+                    follows.mark_seen(uid, fid, it["guid"])
+                    try:
+                        await context.bot.send_message(
+                            f["chat_id"],
+                            f"📡 {f['name']}\n⏭️ skip: {it['title'][:60]}\n"
+                            f"{skip_reason}")
+                    except Exception:
+                        pass
+                    continue
                 try:
                     msg = await context.bot.send_message(
                         f["chat_id"],
@@ -2792,6 +3206,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = re.fullmatch(r"thc:([0-9a-f]{12}):([yn])", q.data or "")
     if m:
         await thc_pick(q, m.group(1), m.group(2) == "y")
+        return
+    m = re.fullmatch(r"dlx:([0-9a-f]{12})", q.data or "")
+    if m:
+        await dlx_pick(q, m.group(1))
+        return
+    m = re.fullmatch(r"sbest:([0-9a-f]{12})", q.data or "")
+    if m:
+        await sbest_pick(q, m.group(1))
+        return
+    m = re.fullmatch(r"dwdel:([0-9a-f]+)", q.data or "")
+    if m:
+        await dwdel_pick(q, m.group(1))
         return
     m = re.fullmatch(r"ssort:([0-9a-f]{12}):(seeders|mp4)", q.data or "")
     if m:
@@ -3491,6 +3917,9 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
             def _prog(done: int, total: int):
                 pct = int(done / total * 100) if total else 0
                 now = time.time()
+                entry = _active_downloads.get(dl_token)
+                if entry is not None:
+                    entry["done"] = done
                 if pct != last_edit[1] and now - last_edit[0] >= 10:
                     last_edit[0], last_edit[1] = now, pct
                     fut = status.edit_text(
@@ -3505,8 +3934,22 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                 return False
             idxs = ",".join(t["index"] for t in pending)
             total = sum(t["size"] for t in pending)
-            paths = await asyncio.to_thread(
-                download_torrent, aria_src, tmpdir, idxs, total, _prog)
+            dl_token = secrets.token_hex(6)
+            cancel_event = threading.Event()
+            dname = os.path.basename(pending[0]["path"])
+            if len(pending) > 1:
+                dname += f" (+{len(pending) - 1})"
+            _active_downloads[dl_token] = {
+                "uid": uid, "chat_id": chat_id, "name": dname,
+                "total": total, "done": 0, "started": time.time(),
+                "cancel_event": cancel_event,
+            }
+            try:
+                paths = await asyncio.to_thread(
+                    download_torrent, aria_src, tmpdir, idxs, total, _prog,
+                    cancel_event=cancel_event)
+            finally:
+                _active_downloads.pop(dl_token, None)
             by_size, by_base = {}, {}
             for p in paths:
                 try:
@@ -4204,11 +4647,18 @@ def main():
         ("subs", subs_cmd),
         ("menu", menu_cmd),
         ("drivestatus", drivestatus_cmd),
+        ("dl", dl_cmd),
+        ("totorrent", totorrent_cmd),
+        ("setminseeders", setminseeders_cmd),
+        ("blacklist", blacklist_cmd),
+        ("watchdead", watchdead_cmd),
+        ("deadwatch", deadwatch_cmd),
+        ("unwatchdead", unwatchdead_cmd),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
         on_button,
-        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|dlc:|ssort:|menu:|subm:|subs:).*"))
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
@@ -4230,8 +4680,9 @@ def main():
         jq.run_repeating(watch_job, interval=300, first=90)
         jq.run_repeating(night_job, interval=3600, first=120)
         jq.run_repeating(follow_job, interval=1800, first=180)
+        jq.run_repeating(deadwatch_job, interval=1800, first=240)
         jq.run_repeating(expiry_job, interval=86400, first=120)
-        print("⏰ background jobs: watch (5min), night queue (1h), follow (30min), expiry (24h)")
+        print("⏰ background jobs: watch (5min), night queue (1h), follow (30min), deadwatch (30min), expiry (24h)")
     print("📡 Polling စတင်နေပါပြီ...")
     app.run_polling()
 

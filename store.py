@@ -315,6 +315,8 @@ DEFAULTS = {
     "night_hour": 3,      # KST hour (0-23) to process queue
     "save": False,        # also save copy to Saved Messages
     "convert": "ask",     # MKV torrent: ask|always|never convert to MP4/AAC
+    "min_seeders": 0,     # follow auto-download: skip releases with fewer seeders (0 = off)
+    "blacklist": ["cam", "ts", "hdcam", "hdts", "telesync"],  # follow: skip titles containing these
 }
 
 
