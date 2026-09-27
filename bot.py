@@ -2058,8 +2058,21 @@ async def _stream_offer(uid: int, chat_id: int, tmdb_id: int, media_type: str,
         _STREAM_SOURCES.pop(k, None)
     try:
         if status_msg is None:
-            status_msg = await bot_client.send_message(
-                chat_id, f"{tag} 🔍 stream ရှာနေပါတယ်...")
+            # v6.14.2: bound the initial send — a stalled MTProto invoke
+            # parked the whole flow silently (same class as the 2026-09-28
+            # 5.5h watch wedge). On failure continue with None; the picker
+            # is still delivered as a fresh message at the end.
+            try:
+                status_msg = await asyncio.wait_for(
+                    bot_client.send_message(
+                        chat_id, f"{tag} 🔍 stream ရှာနေပါတယ်..."),
+                    timeout=20)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"⚠️ stream: initial status send failed: "
+                      f"{type(e).__name__}", flush=True)
+                status_msg = None
         else:
             try:
                 await status_msg.edit_text(f"{tag} 🔍 stream ရှာနေပါတယ်...")
@@ -2113,22 +2126,20 @@ async def _stream_offer(uid: int, chat_id: int, tmdb_id: int, media_type: str,
             cap_txt = fmt_size(MAX_MB * 1048576)
             note += (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
                      f"⚠️ {dropped} dropped (over {cap_txt}).")
-        try:
-            await status_msg.edit_text(
-                f"{tag} **{title}{suffix}**\n🔗 via {label}\n\n"
-                f"Quality + file size ရွေးပါ / pick one:{note}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            pass
+        # v6.14.2: terminal delivery — never swallow the picker or the
+        # error silently (same bug class as the 2026-09-28 watch incident).
+        await _deliver_status(
+            chat_id, status_msg,
+            f"{tag} **{title}{suffix}**\n🔗 via {label}\n\n"
+            f"Quality + file size ရွေးပါ / pick one:{note}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
         traceback.print_exc()
         msg = getattr(e, "message", None)
-        try:
-            await status_msg.edit_text(
-                msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
-        except Exception:
-            pass
+        await _deliver_status(
+            chat_id, status_msg,
+            msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
 
 
 async def sstream_pick(q, tmdb_id: int, idx: int):
@@ -2167,17 +2178,19 @@ _WATCH_PROBE_EXEC = concurrent.futures.ThreadPoolExecutor(
     max_workers=32, thread_name_prefix="watchprobe")
 
 
-async def _deliver_watch_status(chat_id, status_msg, text, timeout=20,
+async def _deliver_status(chat_id, status_msg, text, timeout=20,
                                 **kwargs):
-    """Terminal status delivery for the watch flow — never ends silently.
+    """Terminal status delivery — never ends silently.
 
     v6.14.1: on 2026-09-28 the browser cleared the Cloudflare wall and all
     batch-1 probes finished, yet the user never got the quality picker and
     the journal showed nothing after 'probe done: vidnest'. The final
     _safe_status_edit failed (flaky MTProto / flood ban) and its False
     return was ignored, so _watch_offer returned with no message and no
-    log. Now: try the edit; if it fails, send a fresh message instead;
-    log every outcome. Returns the message carrying the text, or None.
+    log. v6.14.2: the same silent-terminal pattern existed in _stream_offer
+    and _stream_download, so this helper is now shared by all flows.
+    Try the edit; if it fails, send a fresh message instead; log every
+    outcome. Returns the message carrying the text, or None.
     Never raises (CancelledError still propagates).
     """
     from watch import _safe_status_edit
@@ -2265,8 +2278,14 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
                        _safe_status_edit)
     parsed = parse_watch_url(watch_url)
     if not parsed:
-        await bot_client.send_message(
-            chat_id, "❌ watch link ပုံစံ မမှန်ပါ.\n\n❌ Not a watch link.")
+        # v6.14.2: bound (stalled-MTProto wedge class).
+        try:
+            await asyncio.wait_for(
+                bot_client.send_message(
+                    chat_id, "❌ watch link ပုံစံ မမှန်ပါ.\n\n❌ Not a watch link."),
+                timeout=20)
+        except Exception:
+            pass
         return
     media_type = parsed["media_type"]
     season = season or parsed["season"] or (1 if media_type == "tv" else None)
@@ -2388,7 +2407,7 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
         # v6.14.1: terminal delivery — if the edit fails, send a fresh
         # message instead of ending silently (2026-09-28: picker never
         # reached the user, journal showed nothing after the probes).
-        await _deliver_watch_status(
+        await _deliver_status(
             chat_id, status_msg,
             f"{tag} **{title}{suffix}**\n🔗 via {label} (watch page)\n\n"
             f"Quality + file size ရွေးပါ / pick one:{note}",
@@ -2397,14 +2416,14 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
     except Exception as e:
         traceback.print_exc()
         msg = getattr(e, "message", None)
-        await _deliver_watch_status(
+        await _deliver_status(
             chat_id, status_msg,
             msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
     except BaseException as e:
         # v6.13.5: never die silently — on 2026-09-28 the probe task died
         # with no journal output at all ('server 4/14' stuck 5.5h).
         traceback.print_exc()
-        await _deliver_watch_status(
+        await _deliver_status(
             chat_id, status_msg,
             f"❌ {tag} ရပ်သွားပါတယ် — link ပြန်ပို့ပေးပါ.\n\n"
             f"❌ Interrupted ({type(e).__name__}) — please resend the link.")
@@ -2463,7 +2482,18 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
     tag = "🎬"
     try:
         if status_msg is None:
-            status_msg = await bot_client.send_message(chat_id, f"{tag} stream ရှာနေပါတယ်...")
+            # v6.14.2: bound the initial send (stalled-MTProto wedge class).
+            try:
+                status_msg = await asyncio.wait_for(
+                    bot_client.send_message(
+                        chat_id, f"{tag} stream ရှာနေပါတယ်..."),
+                    timeout=20)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"⚠️ stream dl: initial status send failed: "
+                      f"{type(e).__name__}", flush=True)
+                status_msg = None
         else:
             try:
                 await status_msg.edit_text(f"{tag} stream ရှာနေပါတယ်...")
@@ -2510,7 +2540,11 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
             if s_cancel.is_set():
                 raise WebDownloadCancelled(WebDownloadCancelled.CANCEL_MSG)
             caption = f"{tag} {title}{suffix}\n🔗 via {provider}"
-            await status_msg.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
+            if status_msg is not None:
+                try:
+                    await status_msg.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
+                except Exception:
+                    pass
             await deliver(uid, chat_id, path, caption, "video", False, True,
                           log_kind="stream", status=status_msg)
             print(f"✅ stream ပို့ပြီးပါပြီ -> {uid} ({provider})")
@@ -2518,19 +2552,16 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
             shutil.rmtree(tmpdir, ignore_errors=True)
     except Exception as e:
         if isinstance(e, WebDownloadCancelled):
-            try:
-                await status_msg.edit_text(
-                    str(e) or "❌ ရပ်လိုက်ပါပြီ.\n\n❌ Cancelled.")
-            except Exception:
-                pass
+            # v6.14.2: terminal delivery — never end silently.
+            await _deliver_status(
+                chat_id, status_msg,
+                str(e) or "❌ ရပ်လိုက်ပါပြီ.\n\n❌ Cancelled.")
             return
         traceback.print_exc()
         msg = getattr(e, "message", None)
-        try:
-            await status_msg.edit_text(
-                msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
-        except Exception:
-            pass
+        await _deliver_status(
+            chat_id, status_msg,
+            msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
 
 
 # ------------------------------------------------- general torrent search
@@ -5269,8 +5300,13 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                                       wk, as_audio, wk == "video", log_kind="web",
                                       cache_key=n_ckey, src_url=url)
                     try:
-                        await bot_client.send_message(
-                            it["chat_id"], f"🌙 ညဘက် download ပြီးပါပြီ: {it.get('label','')}")
+                        # v6.14.2: bound — a stalled send parked the whole
+                        # night queue silently (MTProto has no client timeout).
+                        await asyncio.wait_for(
+                            bot_client.send_message(
+                                it["chat_id"],
+                                f"🌙 ညဘက် download ပြီးပါပြီ: {it.get('label','')}"),
+                            timeout=20)
                     except Exception:
                         pass
                 except Exception as e:
@@ -5279,8 +5315,11 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                             and e.kind in PERMANENT_KINDS):
                         # permanent failure (dead link, folder link, no key…)
                         # — tell the user once, don't retry every night
+                        # v6.14.2: bound (stalled-MTProto wedge class).
                         try:
-                            await bot_client.send_message(it["chat_id"], e.message)
+                            await asyncio.wait_for(
+                                bot_client.send_message(it["chat_id"], e.message),
+                                timeout=20)
                         except Exception:
                             pass
                     else:
