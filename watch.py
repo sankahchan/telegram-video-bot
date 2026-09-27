@@ -65,7 +65,8 @@ def extract_embeds_from_html(html: str) -> list:
     urls = []
     m = re.search(r"window\.__OPT\s*=\s*\[(.*?)\]", html or "", re.S)
     if m:
-        urls = re.findall(r'"(https?://[^"]+)"', m.group(1))
+        # v6.13.1: quote-agnostic — site may use single quotes
+        urls = re.findall(r'''["'](https?://[^"']+)["']''', m.group(1))
     if not urls:
         m2 = re.search(r'<iframe[^>]+id="embed-iframe"[^>]+src="([^"]+)"',
                        html or "")
@@ -128,9 +129,34 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
             client.close()
     embeds = extract_embeds_from_html(html)
     if not embeds:
-        raise WatchError("no_embed",
-                         "❌ ဒီ page မှာ video server ရှာမရပါ.\n\n"
-                         "❌ No video servers found on this page.")
+        # v6.13.1: diagnose WHY — the page HTML changed between two fetches
+        # 11 minutes apart (2026-09-27: 18:56 had 14 embeds, 19:07 had none).
+        # Include the page title so one screenshot reveals a bot-check page,
+        # an empty server list, or a changed page format.
+        mt = re.search(r"<title>(.*?)</title>", html or "", re.S | re.I)
+        ptitle = (re.sub(r"\s+", " ", mt.group(1)).strip()[:80]
+                  if mt else "?")
+        has_opt = "window.__OPT" in (html or "")
+        print(f"⛔ watch embeds: __OPT present={has_opt}, "
+              f"title={ptitle!r}, {len(html or '')}b", flush=True)
+        if has_opt:
+            detail = ("❌ ဒီ episode အတွက် video server list ဗလာဖြစ်နေပါတယ် — "
+                      "episode မထွက်သေးတာ (သို့) site က ဖြုတ်ထားတာ ဖြစ်နိုင်ပါတယ်.\n\n"
+                      "❌ This episode has no video servers listed — it may "
+                      "not be out yet or was removed from the site.")
+        elif "just a moment" in ptitle.lower() \
+                or "challenge" in ptitle.lower() \
+                or "attention required" in ptitle.lower():
+            detail = ("❌ site က bot-check စာမျက်နှာ ပြနေပါတယ် — VPS IP ကို "
+                      "ခဏ block ထားတာ ဖြစ်နိုင်ပါတယ်, ၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ.\n\n"
+                      "❌ The site is showing a bot-check page — the VPS IP "
+                      "may be temporarily blocked; try again in 10-15 minutes.")
+        else:
+            detail = ("❌ ဒီ page မှာ video server ရှာမရပါ "
+                      f"(page title: {ptitle}).\n\n"
+                      "❌ No video servers found on this page "
+                      f"(page title: {ptitle}).")
+        raise WatchError("no_embed", detail)
     title = extract_watch_title(html) or "Watch"
     return title, embeds
 

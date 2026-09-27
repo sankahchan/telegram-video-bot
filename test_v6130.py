@@ -248,6 +248,86 @@ def test_pick_watch_server_first_healthy_wins_despite_speed():
     assert payload[0] == "a", f"order not preserved: {payload}"
 
 
+# ---- watch.py v6.13.1: no-embed diagnostics ---------------------------------
+def test_extract_embeds_single_quotes():
+    from watch import extract_embeds_from_html
+    html = ("<html><script>window.__OPT = ['https://vidsrc.xyz/embed/1',\n"
+            "'https://vidnest.io/e/2'];</script></html>")
+    out = extract_embeds_from_html(html)
+    assert [u for _, u in out] == ["https://vidsrc.xyz/embed/1",
+                                   "https://vidnest.io/e/2"], out
+
+
+def test_extract_embeds_empty_opt():
+    from watch import extract_embeds_from_html
+    out = extract_embeds_from_html("<script>window.__OPT = [];</script>")
+    assert out == [], out
+
+
+class _FakeResp:
+    def __init__(self, html):
+        self.text = html
+
+    def raise_for_status(self):
+        pass
+
+
+class _FakeClient:
+    def __init__(self, html):
+        self._html = html
+
+    def get(self, url, headers=None, timeout=None):
+        return _FakeResp(self._html)
+
+    def close(self):
+        pass
+
+
+def _watch_embeds_with_html(html):
+    from watch import fetch_watch_embeds, WatchError
+    try:
+        return fetch_watch_embeds("https://andyday.sx/watch/tv-lioness-abc",
+                                  3, 3, client=_FakeClient(html))
+    except WatchError as e:
+        return e
+
+
+def test_no_embed_empty_server_list_message():
+    from watch import WatchError
+    html = ("<html><head><title>Watch Lioness TV Online - Andyday</title></head>"
+            "<script>window.__OPT = [];</script></html>")
+    e = _watch_embeds_with_html(html)
+    assert isinstance(e, WatchError), e
+    assert "ဗလာ" in e.message, e.message
+
+
+def test_no_embed_botcheck_message():
+    from watch import WatchError
+    html = ("<html><head><title>Just a moment...</title></head>"
+            "<body>challenge</body></html>")
+    e = _watch_embeds_with_html(html)
+    assert isinstance(e, WatchError), e
+    assert "bot-check" in e.message, e.message
+
+
+def test_no_embed_generic_message_has_title():
+    from watch import WatchError
+    html = ("<html><head><title>Some New Layout Page</title></head>"
+            "<body>hello</body></html>")
+    e = _watch_embeds_with_html(html)
+    assert isinstance(e, WatchError), e
+    assert "Some New Layout Page" in e.message, e.message
+
+
+def test_embeds_found_normal_path():
+    html = ("<html><head><title>Watch Lioness TV Online - Andyday</title></head>"
+            "<script>window.__OPT = [\"https://vidsrc.xyz/e/1\"];</script>"
+            "</html>")
+    title, embeds = _watch_embeds_with_html(html)
+    assert title == "Lioness", title
+    assert [u for _, u in embeds] == ["https://vidsrc.xyz/e/1"], embeds
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_")]
@@ -261,3 +341,5 @@ if __name__ == "__main__":
             print(f"FAIL {t.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
