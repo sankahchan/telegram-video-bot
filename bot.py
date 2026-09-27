@@ -2039,10 +2039,11 @@ async def stream_pick(q, media_type: str, tmdb_id: int):
 
 async def _stream_offer(uid: int, chat_id: int, tmdb_id: int, media_type: str,
                         title: str, season, episode, status_msg=None):
-    """Resolve provider streams, probe file sizes, show quality+size picker."""
-    from embed import (resolve_streams, probe_source_size, pick_best,
-                       stream_src_label, filter_oversize, fmt_size,
-                       EmbedError, MAX_MB)
+    """Resolve provider streams, skip dead providers, probe file sizes,
+    show quality+size picker."""
+    from embed import (collect_provider_streams, probe_source_size, pick_best,
+                       stream_src_label, filter_oversize, provider_looks_dead,
+                       fmt_size, EmbedError, MAX_MB)
     tag = "🎬" if media_type == "movie" else "📺"
     suffix = f" S{season}E{episode}" if media_type == "tv" else ""
     # prune stale picker entries
@@ -2059,32 +2060,54 @@ async def _stream_offer(uid: int, chat_id: int, tmdb_id: int, media_type: str,
                 await status_msg.edit_text(f"{tag} 🔍 stream ရှာနေပါတယ်...")
             except Exception:
                 pass
-        label, sources = await asyncio.to_thread(
-            resolve_streams, tmdb_id, media_type, season, episode)
-        probe_list = sources[:_STREAM_PROBE_LIMIT]
-        sizes = await asyncio.gather(
-            *[asyncio.to_thread(probe_source_size, s) for s in probe_list])
-        kept, ksizes, dropped = filter_oversize(probe_list, list(sizes))
-        if not kept:
+        providers = await asyncio.to_thread(
+            collect_provider_streams, tmdb_id, media_type, season, episode)
+        if not providers:
             raise EmbedError(
-                "too_big",
-                f"❌ တွေ့တဲ့ stream အားလုံး ကြီးလွန်းပါတယ် (>{MAX_MB}MB).\n\n"
-                f"❌ All found streams exceed {MAX_MB}MB.")
-        best = pick_best(kept)
+                "no_stream",
+                "❌ stream ရှာမရပါ — provider အားလုံး fail ဖြစ်ပါတယ်.\n"
+                "ခဏနေမှ ပြန်စမ်းကြည့်ပါ.\n\n"
+                "❌ No stream found — all providers failed. Try again later.")
+        label = sources = sizes = None
+        dropped = 0
+        skipped = []
+        for plabel, psources in providers:
+            probe_list = psources[:_STREAM_PROBE_LIMIT]
+            psizes = await asyncio.gather(
+                *[asyncio.to_thread(probe_source_size, s) for s in probe_list])
+            kept, ksizes, pdrop = filter_oversize(probe_list, list(psizes))
+            if kept and provider_looks_dead(ksizes):
+                skipped.append(plabel)
+                continue  # link အသေတွေချည်း — နောက် provider စမ်း
+            if kept:
+                label, sources, sizes, dropped = plabel, kept, ksizes, pdrop
+                break
+            skipped.append(plabel)
+        if sources is None:
+            raise EmbedError(
+                "no_stream",
+                "❌ ဒီ title အတွက် link အသေတွေပဲ တွေ့ပါတယ် — "
+                "တခြား title စမ်းကြည့်ပါ.\n\n"
+                "❌ Only dead links found for this title — try another one.")
+        best = pick_best(sources)
         _STREAM_SOURCES[(uid, tmdb_id)] = {
-            "sources": kept, "sizes": ksizes, "title": title,
+            "sources": sources, "sizes": sizes, "title": title,
             "media_type": media_type, "season": season, "episode": episode,
             "provider": label, "ts": now}
         kb = []
-        for i, (s, z) in enumerate(zip(kept, ksizes)):
+        for i, (s, z) in enumerate(zip(sources, sizes)):
             kb.append([InlineKeyboardButton(
                 stream_src_label(s, z, s is best),
                 callback_data=f"sstream:{tmdb_id}:{i}")])
         note = ""
+        if skipped:
+            skip_txt = ", ".join(skipped)
+            note += (f"\n⚠️ {skip_txt} — link အသေမို့ ကျော်လိုက်ပါတယ်.\n"
+                     f"⚠️ Skipped dead links from {skip_txt}.")
         if dropped:
             cap_txt = fmt_size(MAX_MB * 1048576)
-            note = (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
-                    f"⚠️ {dropped} dropped (over {cap_txt}).")
+            note += (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
+                     f"⚠️ {dropped} dropped (over {cap_txt}).")
         try:
             await status_msg.edit_text(
                 f"{tag} **{title}{suffix}**\n🔗 via {label}\n\n"

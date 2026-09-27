@@ -189,12 +189,12 @@ def _vidsrc_embed_url(tmdb_id: int, media_type: str, season, episode) -> str:
     return f"{base}/movie/{tmdb_id}"
 
 
-def resolve_streams(tmdb_id: int, media_type: str = "movie",
-                    season: int | None = None,
-                    episode: int | None = None) -> tuple:
-    """Run the provider cascade. Returns (provider_label, sources).
-    Raises EmbedError(not_found / no_stream). Blocking — run in a thread."""
-    last_err = None
+def collect_provider_streams(tmdb_id: int, media_type: str = "movie",
+                             season: int | None = None,
+                             episode: int | None = None) -> list:
+    """[(provider_label, sources)] for every provider with sources, in cascade
+    order. Blocking — run in a thread."""
+    out = []
     with httpx.Client(headers={"User-Agent": UA}, timeout=25,
                       follow_redirects=True, trust_env=False) as client:
         for label, fn in CASCADE:
@@ -203,9 +203,8 @@ def resolve_streams(tmdb_id: int, media_type: str = "movie",
                          season=season, episode=episode) or {}
                 srcs = [s for s in (res.get("sources") or []) if s.get("url")]
                 if srcs:
-                    return label, srcs
+                    out.append((label, srcs))
             except Exception as e:
-                last_err = e
                 print(f"⚠️ embed {label} failed for {tmdb_id}: {type(e).__name__}")
                 continue
         # VidSrc family last (needs an embed URL, Turnstile risk)
@@ -214,15 +213,31 @@ def resolve_streams(tmdb_id: int, media_type: str = "movie",
                 client, _vidsrc_embed_url(tmdb_id, media_type, season, episode)) or {}
             srcs = [s for s in (res.get("sources") or []) if s.get("url")]
             if srcs:
-                return "VidSrc", srcs
+                out.append(("VidSrc", srcs))
         except Exception as e:
-            last_err = e
             print(f"⚠️ embed VidSrc failed for {tmdb_id}: {type(e).__name__}")
+    return out
+
+
+def resolve_streams(tmdb_id: int, media_type: str = "movie",
+                    season: int | None = None,
+                    episode: int | None = None) -> tuple:
+    """Run the provider cascade. Returns (provider_label, sources).
+    Raises EmbedError(not_found / no_stream). Blocking — run in a thread."""
+    for label, srcs in collect_provider_streams(tmdb_id, media_type, season, episode):
+        return label, srcs
     raise EmbedError(
         "no_stream",
         "❌ stream ရှာမရပါ — provider အားလုံး fail ဖြစ်ပါတယ်.\n"
         "ခဏနေမှ ပြန်စမ်းကြည့်ပါ.\n\n"
         "❌ No stream found — all providers failed. Try again later.")
+
+
+def provider_looks_dead(sizes: list) -> bool:
+    """True when every known size is suspiciously small (< 5MB) — the
+    provider's links are placeholders, not the real video."""
+    known = [z for z in sizes if z is not None]
+    return bool(known) and all(z < SMALL_WARN_BYTES for z in known)
 
 
 def download_embed(source: dict, title: str, tmpdir: str,
