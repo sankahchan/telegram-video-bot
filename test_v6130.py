@@ -390,6 +390,49 @@ def test_looks_like_loading_wall():
     assert _looks_like_loading_wall("") is False
 
 
+# ---- _pick_watch_server v6.13.3: per-server timeout bound --------------------
+def test_pick_watch_server_hung_probe_is_bounded():
+    import asyncio, time
+    _pick_watch_server = _bot_fn("_pick_watch_server")
+
+    async def fake_try(item):
+        name, _ = item
+        if name == "hang":
+            await asyncio.sleep(30)  # would stall the batch forever
+            return (name, "ok", "never")
+        await asyncio.sleep(0.05)
+        return (name, "dead", None)
+
+    async def go():
+        embeds = [("hang", "u0"), ("s1", "u1"), ("s2", "u2"), ("s3", "u3"),
+                  ("good", "u4")]
+        t0 = time.time()
+        found, skipped, _ = await _pick_watch_server(
+            embeds, fake_try, None, batch=4, per_server_timeout=2)
+        return time.time() - t0, found, skipped
+
+    async def good_try(item):
+        name, _ = item
+        if name == "good":
+            return (name, "ok", "PAYLOAD")
+        return (name, "dead", None)
+
+    # patch fake_try to succeed on "good" for the order check below
+    dt, found, skipped = asyncio.run(go())
+    assert dt < 10, f"batch not bounded: {dt:.1f}s"
+    assert found is None  # "good" is in batch 2, unreachable here
+    assert "hang" in skipped, skipped
+
+    async def go2():
+        embeds = [("hang", "u0"), ("good", "u1")]
+        return await _pick_watch_server(
+            embeds, good_try, None, batch=4, per_server_timeout=2)
+
+    found2, skipped2, _ = asyncio.run(go2())
+    assert found2 == "PAYLOAD", found2  # order kept: good wins despite hang
+    assert "hang" in skipped2, skipped2
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_")]

@@ -36,6 +36,7 @@ import shutil
 import urllib.parse
 import mimetypes
 import asyncio
+import concurrent.futures
 import tempfile
 import traceback
 import zipfile
@@ -2158,20 +2159,39 @@ _WATCH_SOURCES: dict = {}  # (uid, wkey) -> {sources,sizes,title,media_type,
 #                            season,episode,provider,ts}
 _WATCH_TTL = 600
 
+# v6.13.3: dedicated pool for watch probing. asyncio.to_thread's default pool
+# is min(32, cpu_count+4) — on a small VPS that's ~6 workers, but one probe
+# batch fires ~28 blocking tasks (4 servers x (1 extract + 6 size probes)),
+# so tasks queued for 10+ minutes while the status sat at "server 4/14".
+_WATCH_PROBE_EXEC = concurrent.futures.ThreadPoolExecutor(
+    max_workers=32, thread_name_prefix="watchprobe")
+
 
 async def _pick_watch_server(embeds, try_server, progress_cb=None,
-                             batch: int = 4):
+                             batch: int = 4, per_server_timeout: float = 60):
     """Probe watch-page servers in parallel batches, cascade priority kept.
 
     embeds: [(server_name, embed_url), ...] in priority order.
     try_server: async fn(item) -> (server_name, status, payload) with
         status in {"ok", "dead", "unsupported"}.
     progress_cb: async fn(done_count, total) — status updates between batches.
+    per_server_timeout: hard bound per server — a hung probe can never stall
+        a batch past this (v6.13.3: batch 1 sat 10+ min at "server 4/14"
+        because ~28 blocking tasks queued on asyncio.to_thread's tiny
+        default pool with no per-server bound).
     Returns (payload_or_None, skipped, unsupported).
     v6.13.0: replaces the sequential loop that froze the status for 6+
     minutes (14 x 25s timeouts) on "watch page ဖတ်နေပါတယ်...".
     """
     skipped, unsupported = [], []
+
+    async def _bounded(item):
+        try:
+            return await asyncio.wait_for(try_server(item),
+                                          timeout=per_server_timeout)
+        except Exception:
+            return (item[0], "dead", None)
+
     for bi in range(0, len(embeds), batch):
         group = embeds[bi:bi + batch]
         if progress_cb is not None:
@@ -2179,7 +2199,7 @@ async def _pick_watch_server(embeds, try_server, progress_cb=None,
                 await progress_cb(bi + len(group), len(embeds))
             except Exception:
                 pass
-        results = await asyncio.gather(*[try_server(it) for it in group])
+        results = await asyncio.gather(*[_bounded(it) for it in group])
         # gather preserves order -> first healthy in server order wins
         for server_name, st, payload in results:
             if st == "ok":
@@ -2238,21 +2258,33 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
             "ok" / "dead" / "unsupported".
             """
             server_name, embed_url = item
+            # v6.13.3: run blocking probes on the dedicated pool, not
+            # asyncio.to_thread's tiny default pool (thread starvation hung
+            # batch 1 for 10+ minutes on the VPS).
+            loop = asyncio.get_running_loop()
+            t0 = time.time()
+            print(f"🔍 watch probe start: {server_name}", flush=True)
             try:
-                plabel, psources = await asyncio.to_thread(
-                    extract_embed_sources, embed_url, client)
-            except WatchError as e:
-                return (server_name,
-                        "unsupported" if e.kind == "unsupported" else "dead",
-                        None)
-            probe_list = psources[:_STREAM_PROBE_LIMIT]
-            psizes = await asyncio.gather(
-                *[asyncio.to_thread(probe_source_size, s)
-                  for s in probe_list])
-            kept, ksizes, pdrop = filter_oversize(probe_list, list(psizes))
-            if kept and not provider_looks_dead(ksizes):
-                return (server_name, "ok", (plabel, kept, ksizes, pdrop))
-            return (server_name, "dead", None)
+                try:
+                    plabel, psources = await loop.run_in_executor(
+                        _WATCH_PROBE_EXEC,
+                        extract_embed_sources, embed_url, client)
+                except WatchError as e:
+                    return (server_name,
+                            "unsupported" if e.kind == "unsupported" else "dead",
+                            None)
+                probe_list = psources[:_STREAM_PROBE_LIMIT]
+                psizes = await asyncio.gather(
+                    *[loop.run_in_executor(_WATCH_PROBE_EXEC,
+                                           probe_source_size, s)
+                      for s in probe_list])
+                kept, ksizes, pdrop = filter_oversize(probe_list, list(psizes))
+                if kept and not provider_looks_dead(ksizes):
+                    return (server_name, "ok", (plabel, kept, ksizes, pdrop))
+                return (server_name, "dead", None)
+            finally:
+                print(f"🔍 watch probe done: {server_name} "
+                      f"({time.time() - t0:.0f}s)", flush=True)
 
         try:
             # v6.13.0: probe servers in parallel batches via _pick_watch_server
