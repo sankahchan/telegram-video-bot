@@ -42,6 +42,10 @@ import zipfile
 import datetime
 import time
 import uuid
+import secrets
+from torrent_health import (  # noqa: E402
+    extract_infohash, check_health, dead_torrent_warning,
+)
 
 from dotenv import load_dotenv
 
@@ -2092,6 +2096,92 @@ def _with_trackers(magnet: str) -> str:
     return magnet + "&" + qs
 
 
+# --- torrent health pre-check (dead-magnet early warning) -------------------
+# token -> pending download context while the user answers the dead-torrent
+# prompt. Entries expire after 30 min (pruned on access).
+_health_pending: dict = {}
+_HEALTH_PROMPT_TTL = 1800
+
+
+def _prune_health_pending() -> None:
+    now = time.time()
+    for tok in [t for t, p in _health_pending.items()
+                if now - p.get("ts", 0) > _HEALTH_PROMPT_TTL]:
+        _health_pending.pop(tok, None)
+
+
+async def _health_gate(status, uid: int, chat_id: int, source: str, ih: str,
+                       convert, ask_convert: bool, src_id,
+                       tdata) -> bool:
+    """Pre-download seeder probe for magnets.
+
+    Returns True to proceed immediately. Returns False when the dead-torrent
+    warning was posted (the thc: buttons let the user force or cancel) or
+    when the check itself errored out safely. Never blocks the download on
+    checker failures — worst case is the old behavior (DHT metadata wait).
+    """
+    await _send_with_retry(
+        status.edit_text,
+        "🧲 seeder ရှိ/မရှိ စစ်နေပါတယ် (စက္ကန့်အနည်းငယ်)...\n"
+        "Checking for live seeders (a few seconds)...")
+    try:
+        h = await check_health(ih)
+    except Exception as e:
+        print(f"⚠️ torrent health check failed: {e!r}")
+        return True
+    if h["verdict"] != "dead":
+        return True  # alive, or unknown (no tracker answered -> DHT path)
+    token = secrets.token_hex(6)
+    _prune_health_pending()
+    _health_pending[token] = {
+        "ts": time.time(), "uid": uid, "chat_id": chat_id,
+        "magnet": source, "src_id": src_id, "tdata": tdata,
+        "convert": convert, "ask_convert": ask_convert,
+    }
+    await _send_with_retry(
+        status.edit_text,
+        dead_torrent_warning(h),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ဆက်လုပ်မယ်",
+                                 callback_data=f"thc:{token}:y"),
+            InlineKeyboardButton("❌ မလုပ်တော့ဘူး",
+                                 callback_data=f"thc:{token}:n"),
+        ]]))
+    return False
+
+
+async def thc_pick(q, token: str, yes: bool):
+    """Dead-torrent warning answer -> force the download or cancel it."""
+    uid = q.from_user.id
+    _prune_health_pending()
+    pend = _health_pending.pop(token, None)
+    if pend is None or pend.get("uid") != uid:
+        try:
+            await q.edit_message_text(
+                "⏰ ဒီ prompt သက်တမ်းကုန်သွားပါပြီ — link ကို ပြန်ပို့ပေးပါ.\n"
+                "This prompt expired — please resend the link.")
+        except Exception:
+            pass
+        return
+    if not yes:
+        try:
+            await q.edit_message_text("❌ ပယ်ဖျက်လိုက်ပါပြီ.\nCancelled.")
+        except Exception:
+            pass
+        return
+    try:
+        msg = await q.edit_message_text(
+            "🧲 ဆက်လုပ်နေပါတယ် (seeder မတွေ့ပေမယ့် အတင်းစမ်းနေပါတယ်)...\n"
+            "Forcing the download despite no live seeders...")
+    except Exception:
+        msg = q.message
+    await run_torrent(msg, uid, pend["chat_id"], pend["magnet"], True,
+                      src_id=pend.get("src_id"), tdata=pend.get("tdata"),
+                      status=msg, convert=pend.get("convert"),
+                      ask_convert=pend.get("ask_convert", False),
+                      skip_health=True)
+
+
 async def dl_pick(q, info_hash: str):
     """Inline button -> magnet တစ်ခု ဒေါင်း (ပုံမှန် torrent pipeline)."""
     uid = q.from_user.id
@@ -2699,6 +2789,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m:
         await dlc_pick(q, m.group(1), m.group(2) == "y")
         return
+    m = re.fullmatch(r"thc:([0-9a-f]{12}):([yn])", q.data or "")
+    if m:
+        await thc_pick(q, m.group(1), m.group(2) == "y")
+        return
     m = re.fullmatch(r"ssort:([0-9a-f]{12}):(seeders|mp4)", q.data or "")
     if m:
         await ssort_pick(q, m.group(1), m.group(2))
@@ -3289,7 +3383,8 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
                       is_magnet_src: bool, src_id: str | None = None,
                       tdata: bytes | None = None, status=None,
                       convert: bool | None = None,
-                      ask_convert: bool = False) -> bool:
+                      ask_convert: bool = False,
+                      skip_health: bool = False) -> bool:
     """Magnet / .torrent download flow: metadata -> pick files -> download
     -> post-process -> deliver. source = magnet link or .torrent file path.
     src_id: stable identity for per-file cache keys (magnet itself, or the
@@ -3298,7 +3393,9 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
     (background jobs) — skips the initial reply. Returns True on success.
     convert: None = auto iOS remux (default); True/False = user's explicit
     choice from the MKV convert prompt. ask_convert: /search dl: buttons set
-    this so an MKV asks before downloading (dlc: callback resumes)."""
+    this so an MKV asks before downloading (dlc: callback resumes).
+    skip_health: the dead-torrent prompt already answered "proceed" — don't
+    probe seeders a second time."""
     no_aria = ("❌ torrent engine (aria2c) မရှိသေးပါ — VPS မှာ run ပေးပါ:\n"
                "bash /opt/tg-video-bot/update.sh")
     if not have_aria2():
@@ -3316,6 +3413,14 @@ async def run_torrent(emsg, uid: int, chat_id: int, source: str,
         loop = asyncio.get_running_loop()
         try:
             if is_magnet_src:
+                if not skip_health:
+                    ih = extract_infohash(source)
+                    if ih:
+                        ok = await _health_gate(
+                            status, uid, chat_id, source, ih,
+                            convert, ask_convert, src_id, tdata)
+                        if not ok:
+                            return False  # dead-torrent prompt posted
                 await _send_with_retry(
                     status.edit_text,
                     "🧲 magnet metadata ရယူနေပါတယ် (DHT, ခဏကြာနိုင်)...")
