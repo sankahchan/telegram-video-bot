@@ -13,6 +13,18 @@ import httpx
 
 import embed_providers as EP
 
+try:
+    # v6.14.0: headless-Chromium fallback for Cloudflare challenges.
+    # Optional — degrades to (False, None-returning) when playwright
+    # isn't installed, so the bot keeps its old behavior.
+    from watch_browser import browser_available, fetch_watch_html_via_browser
+except Exception:  # pragma: no cover - import guard
+    def browser_available() -> bool:
+        return False
+
+    def fetch_watch_html_via_browser(url: str, timeout: float = 90):
+        return None
+
 WATCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
@@ -243,15 +255,35 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                       "❌ The site is showing a bot-check page — the VPS IP "
                       "may be temporarily blocked; try again in 10-15 minutes.")
         elif _looks_like_cf_challenge(html):
-            # v6.13.4: Cloudflare managed JS challenge — the VPS has no
-            # browser, so it cannot be passed. It cleared on its own twice
-            # today (18:56, 19:17), so waiting usually works.
-            detail = ("❌ site က Cloudflare security check ပြနေပါတယ် — "
-                      "VPS မှာ browser မရှိလို့ ဒီ check ကို ကျော်မရပါ. "
-                      "၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ (ဒီနေ့ ၂ ခါ သူ့အလိုလို ပွင့်ခဲ့တယ်).\n\n"
-                      "❌ The site is showing a Cloudflare security check — "
-                      "the VPS has no browser to pass it. Try again in "
-                      "10-15 minutes (it cleared on its own twice today).")
+            # v6.14.0: before giving up, render the page in headless
+            # Chromium — a real browser can pass the managed JS challenge
+            # that plain HTTP never can (2026-09-28 02:21 KST: hv=1 trick
+            # was not enough). No-op (None) when playwright isn't installed.
+            print("🌐 watch: Cloudflare challenge — trying headless "
+                  "browser fallback...", flush=True)
+            bhtml = fetch_watch_html_via_browser(url, timeout=90)
+            bembeds = extract_embeds_from_html(bhtml) if bhtml else []
+            if bembeds:
+                print(f"✅ watch: browser fallback recovered "
+                      f"{len(bembeds)} embeds", flush=True)
+                return (extract_watch_title(bhtml) or "Watch"), bembeds
+            if browser_available():
+                detail = ("❌ site က Cloudflare security check ပြနေပါတယ် — "
+                          "browser နဲ့ စမ်းပေမယ့် ဒီတစ်ခါ မကျော်နိုင်ပါ. "
+                          "၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ.\n\n"
+                          "❌ The site is showing a Cloudflare security check — "
+                          "even a real browser couldn't pass it this time. "
+                          "Try again in 10-15 minutes.")
+            else:
+                # v6.13.4: Cloudflare managed JS challenge — the VPS has no
+                # browser, so it cannot be passed. It cleared on its own twice
+                # on 2026-09-27 (18:56, 19:17), so waiting usually works.
+                detail = ("❌ site က Cloudflare security check ပြနေပါတယ် — "
+                          "VPS မှာ browser မရှိလို့ ဒီ check ကို ကျော်မရပါ. "
+                          "၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ (ဒီနေ့ ၂ ခါ သူ့အလိုလို ပွင့်ခဲ့တယ်).\n\n"
+                          "❌ The site is showing a Cloudflare security check — "
+                          "the VPS has no browser to pass it. Try again in "
+                          "10-15 minutes (it cleared on its own twice today).")
         elif _looks_like_loading_wall(html):
             # v6.13.2: still walled after 3 retries
             detail = ("❌ site က 'Loading...' ပဲ ပြနေပါတယ် (3 ကြိမ် စမ်းပြီးပြီ) — "

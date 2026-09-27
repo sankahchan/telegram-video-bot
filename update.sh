@@ -23,12 +23,29 @@ if [ "${UPDATE_REEXEC:-}" != "1" ]; then
 fi
 echo "🔍 Code စစ်နေပါတယ်..."
 ./venv/bin/python -m py_compile bot.py store.py web_download.py media_tools.py fast_download.py generate_session.py \
-  x_media.py tiktok_media.py torrent_download.py filecache.py \
+  x_media.py tiktok_media.py torrent_download.py filecache.py watch.py watch_browser.py \
   || { echo "❌ Code error တွေ့လို့ restart မလုပ်ပါ — အဟောင်း ဆက်� run နေမယ်."; exit 1; }
 echo "📚 Dependencies update..."
 ./venv/bin/pip install -q -r requirements.txt
 # YouTube က ခဏခဏ ပြောင်းလို့ yt-dlp ကို latest ထားမှ ရမယ်
 ./venv/bin/pip install -q -U yt-dlp
+echo "🌐 Headless browser (watch-page Cloudflare fallback) စစ်နေပါတယ်..."
+# v6.14.0: one-time Playwright Chromium install (~170MB). Guarded so a
+# failed install NEVER blocks the bot restart — the code degrades to its
+# old behavior when the browser is missing.
+if ! ./venv/bin/python -c "
+from playwright.sync_api import sync_playwright
+import os
+p = sync_playwright().start()
+ok = os.path.exists(p.chromium.executable_path)
+p.stop()
+raise SystemExit(0 if ok else 1)
+" 2>/dev/null; then
+  echo "📥 Playwright Chromium install လုပ်နေပါတယ် (တစ်ခါသာ)..."
+  (./venv/bin/python -m playwright install chromium \
+    && ./venv/bin/python -m playwright install-deps chromium) \
+    || echo "⚠️ Browser install မအောင်မြင်ပါ — bot က old behavior နဲ့ ဆက် run မယ်."
+fi
 echo "🎬 ffmpeg စစ်နေပါတယ်..."
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "📥 ffmpeg မဆိသေးလို့ install လုပ်နေပါတယ်..."
