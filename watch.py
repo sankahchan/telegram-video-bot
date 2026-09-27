@@ -4,6 +4,7 @@ to provider embed URLs, then to downloadable sources via embed_providers.
 Watch page HTML carries window.__OPT = [embed urls...] (index = server).
 No AJAX, no tokens — plain HTTP + regex is enough.
 """
+import asyncio
 import re
 import time
 from urllib.parse import urlparse, parse_qs, urljoin
@@ -111,6 +112,28 @@ def _looks_like_loading_wall(html: str) -> bool:
     if not html or "window.__OPT" in html:
         return False
     return _page_title(html).rstrip(".").lower() == "loading"
+
+
+async def _safe_status_edit(msg, text, timeout: float = 20, **kwargs) -> bool:
+    """Edit a Telegram status message — never hangs forever, never raises.
+
+    v6.13.5: on 2026-09-28 a watch probe wedged at 'server 4/14' for 5.5h
+    with zero journal output. The event loop was alive (/start answered),
+    batch 1 had fully completed, and the next step was a Pyrogram
+    status_msg.edit_text — MTProto invokes have no client-side timeout, so
+    one stalled edit parked the task forever. Every status edit in the
+    watch flow now goes through here with a hard timeout.
+    Returns True if the edit went through. CancelledError is re-raised
+    (task cancellation must still propagate)."""
+    if msg is None:
+        return False
+    try:
+        await asyncio.wait_for(msg.edit_text(text, **kwargs), timeout=timeout)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
 
 
 def _looks_like_cf_challenge(html: str) -> bool:

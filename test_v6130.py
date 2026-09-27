@@ -488,6 +488,58 @@ def test_looks_like_cf_challenge():
     assert _looks_like_cf_challenge(_REAL) is False
 
 
+# ---- watch.py v6.13.5: _safe_status_edit never hangs -----------------------
+class _OkMsg:
+    def __init__(self):
+        self.edits = []
+    async def edit_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
+
+class _HungMsg:
+    async def edit_text(self, text, **kwargs):
+        await asyncio.sleep(3600)  # stalled MTProto invoke
+
+class _BoomMsg:
+    async def edit_text(self, text, **kwargs):
+        raise RuntimeError("telegram down")
+
+class _CancelMsg:
+    async def edit_text(self, text, **kwargs):
+        raise asyncio.CancelledError()
+
+
+def test_safe_status_edit_ok():
+    from watch import _safe_status_edit
+    m = _OkMsg()
+    ok = asyncio.run(_safe_status_edit(m, "hello", parse_mode="Markdown"))
+    assert ok is True
+    assert m.edits == [("hello", {"parse_mode": "Markdown"})], m.edits
+
+
+def test_safe_status_edit_hung_times_out():
+    from watch import _safe_status_edit
+    t0 = time.time()
+    ok = asyncio.run(_safe_status_edit(_HungMsg(), "hello", timeout=0.3))
+    dt = time.time() - t0
+    assert ok is False
+    assert dt < 5, dt
+
+
+def test_safe_status_edit_none_and_boom():
+    from watch import _safe_status_edit
+    assert asyncio.run(_safe_status_edit(None, "x")) is False
+    assert asyncio.run(_safe_status_edit(_BoomMsg(), "x")) is False
+
+
+def test_safe_status_edit_reraises_cancelled():
+    from watch import _safe_status_edit
+    try:
+        asyncio.run(_safe_status_edit(_CancelMsg(), "x", timeout=5))
+        assert False, "should have raised"
+    except asyncio.CancelledError:
+        pass
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_")]

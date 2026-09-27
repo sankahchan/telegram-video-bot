@@ -2194,6 +2194,10 @@ async def _pick_watch_server(embeds, try_server, progress_cb=None,
 
     for bi in range(0, len(embeds), batch):
         group = embeds[bi:bi + batch]
+        # v6.13.5: batch transition log — on 2026-09-28 the journal showed
+        # batch 1 done but batch 2 never starting, with no other output.
+        print(f"🔍 watch batch {bi // batch + 1}: probing "
+              f"{len(group)} servers", flush=True)
         if progress_cb is not None:
             try:
                 await progress_cb(bi + len(group), len(embeds))
@@ -2219,7 +2223,8 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
     from embed import (probe_source_size, pick_best, stream_src_label,
                        filter_oversize, provider_looks_dead, fmt_size, MAX_MB)
     from watch import (parse_watch_url, fetch_watch_embeds,
-                       extract_embed_sources, WatchError, WATCH_UA)
+                       extract_embed_sources, WatchError, WATCH_UA,
+                       _safe_status_edit)
     parsed = parse_watch_url(watch_url)
     if not parsed:
         await bot_client.send_message(
@@ -2236,13 +2241,15 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
         _WATCH_SOURCES.pop(k, None)
     try:
         if status_msg is None:
-            status_msg = await bot_client.send_message(
-                chat_id, f"{tag} 🔍 watch page ဖတ်နေပါတယ်...")
+            # v6.13.5: bound even the initial send — a hung MTProto invoke
+            # must never wedge the flow silently (2026-09-28: 5.5h stuck).
+            status_msg = await asyncio.wait_for(
+                bot_client.send_message(
+                    chat_id, f"{tag} 🔍 watch page ဖတ်နေပါတယ်..."),
+                timeout=20)
         else:
-            try:
-                await status_msg.edit_text(f"{tag} 🔍 watch page ဖတ်နေပါတယ်...")
-            except Exception:
-                pass
+            await _safe_status_edit(
+                status_msg, f"{tag} 🔍 watch page ဖတ်နေပါတယ်...")
         title, embeds = await asyncio.to_thread(
             fetch_watch_embeds, watch_url, season, episode)
         label = sources = sizes = None
@@ -2290,11 +2297,11 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
             # v6.13.0: probe servers in parallel batches via _pick_watch_server
             # (httpx.Client is thread-safe, shared across probe threads).
             async def _progress(done, total):
-                try:
-                    await status_msg.edit_text(
-                        f"{tag} 🔍 server {done}/{total} စမ်းနေပါတယ်...")
-                except Exception:
-                    pass
+                # v6.13.5: hard timeout — a hung edit wedged the probe at
+                # 'server 4/14' for 5.5h on 2026-09-28.
+                await _safe_status_edit(
+                    status_msg,
+                    f"{tag} 🔍 server {done}/{total} စမ်းနေပါတယ်...")
 
             found, bskipped, bun = await _pick_watch_server(
                 embeds, _try_server, _progress)
@@ -2334,22 +2341,27 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
             cap_txt = fmt_size(MAX_MB * 1048576)
             note += (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
                      f"⚠️ {dropped} dropped (over {cap_txt}).")
-        try:
-            await status_msg.edit_text(
-                f"{tag} **{title}{suffix}**\n🔗 via {label} (watch page)\n\n"
-                f"Quality + file size ရွေးပါ / pick one:{note}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb))
-        except Exception:
-            pass
+        await _safe_status_edit(
+            status_msg,
+            f"{tag} **{title}{suffix}**\n🔗 via {label} (watch page)\n\n"
+            f"Quality + file size ရွေးပါ / pick one:{note}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
         traceback.print_exc()
         msg = getattr(e, "message", None)
-        try:
-            await status_msg.edit_text(
-                msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
-        except Exception:
-            pass
+        await _safe_status_edit(
+            status_msg,
+            msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
+    except BaseException as e:
+        # v6.13.5: never die silently — on 2026-09-28 the probe task died
+        # with no journal output at all ('server 4/14' stuck 5.5h).
+        traceback.print_exc()
+        await _safe_status_edit(
+            status_msg,
+            f"❌ {tag} ရပ်သွားပါတယ် — link ပြန်ပို့ပေးပါ.\n\n"
+            f"❌ Interrupted ({type(e).__name__}) — please resend the link.")
+        raise
 
 
 async def wstream_pick(q, wkey: str, idx: int):
