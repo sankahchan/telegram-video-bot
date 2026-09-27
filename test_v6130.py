@@ -328,6 +328,68 @@ def test_embeds_found_normal_path():
     assert [u for _, u in embeds] == ["https://vidsrc.xyz/e/1"], embeds
 
 
+# ---- watch.py v6.13.2: Loading-wall retry + meta-refresh ----------------------
+class _SeqClient:
+    """Returns queued HTML pages in order; records requested URLs."""
+    def __init__(self, pages):
+        self._pages = list(pages)
+        self.urls = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.urls.append(url)
+        return _FakeResp(self._pages.pop(0))
+
+    def close(self):
+        pass
+
+
+_WALL = ("<html><head><title>Loading...</title></head>"
+         "<body>please wait</body></html>")
+_REAL = ("<html><head><title>Watch Lioness TV Online - Andyday</title></head>"
+         "<script>window.__OPT = [\"https://vidsrc.xyz/e/1\"];</script>"
+         "</html>")
+
+
+def test_loading_wall_retry_then_success():
+    from watch import fetch_watch_embeds
+    c = _SeqClient([_WALL, _WALL, _REAL])
+    title, embeds = fetch_watch_embeds("https://andyday.sx/watch/tv-lioness-abc",
+                                       3, 3, client=c)
+    assert len(c.urls) == 3, c.urls
+    assert [u for _, u in embeds] == ["https://vidsrc.xyz/e/1"], embeds
+
+
+def test_loading_wall_persistent_gives_clear_error():
+    from watch import fetch_watch_embeds, WatchError
+    c = _SeqClient([_WALL] * 3)
+    try:
+        fetch_watch_embeds("https://andyday.sx/watch/tv-lioness-abc",
+                           3, 3, client=c)
+        assert False, "should have raised"
+    except WatchError as e:
+        assert "3 ကြိမ်" in e.message, e.message
+    assert len(c.urls) == 3, c.urls
+
+
+def test_meta_refresh_followed():
+    from watch import fetch_watch_embeds
+    refresh = ("<html><head><title>Loading...</title>"
+               "<meta http-equiv=\"refresh\" content=\"0;url=/watch/tv-lioness-abc?ok=1\">"
+               "</head></html>")
+    c = _SeqClient([refresh, _REAL])
+    title, embeds = fetch_watch_embeds("https://andyday.sx/watch/tv-lioness-abc",
+                                       3, 3, client=c)
+    assert c.urls[1].endswith("?ok=1"), c.urls
+    assert [u for _, u in embeds] == ["https://vidsrc.xyz/e/1"], embeds
+
+
+def test_looks_like_loading_wall():
+    from watch import _looks_like_loading_wall
+    assert _looks_like_loading_wall(_WALL) is True
+    assert _looks_like_loading_wall(_REAL) is False
+    assert _looks_like_loading_wall("") is False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_")]

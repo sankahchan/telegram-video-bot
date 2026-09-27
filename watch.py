@@ -5,7 +5,8 @@ Watch page HTML carries window.__OPT = [embed urls...] (index = server).
 No AJAX, no tokens — plain HTTP + regex is enough.
 """
 import re
-from urllib.parse import urlparse, parse_qs
+import time
+from urllib.parse import urlparse, parse_qs, urljoin
 
 import httpx
 
@@ -98,6 +99,20 @@ def extract_watch_title(html: str) -> str | None:
     return t.strip() or None
 
 
+def _page_title(html: str) -> str:
+    mt = re.search(r"<title>(.*?)</title>", html or "", re.S | re.I)
+    return (re.sub(r"\s+", " ", mt.group(1)).strip()[:80] if mt else "?")
+
+
+def _looks_like_loading_wall(html: str) -> bool:
+    """The site intermittently serves a JS 'Loading...' interstitial instead
+    of the server list (2026-09-27: real page at 18:56, wall at 19:07/19:09).
+    window.__OPT is only injected by JavaScript afterwards."""
+    if not html or "window.__OPT" in html:
+        return False
+    return _page_title(html).rstrip(".").lower() == "loading"
+
+
 def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                        client=None, timeout: float = 20) -> tuple:
     """-> (title, [(server_name, embed_url)]). Blocking."""
@@ -114,16 +129,37 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                               timeout=timeout, follow_redirects=True,
                               trust_env=False)
     try:
-        r = client.get(url, headers={"User-Agent": WATCH_UA}, timeout=timeout)
-        r.raise_for_status()
-        html = r.text
-    except WatchError:
-        raise
-    except Exception as e:
-        raise WatchError(
-            "fetch_fail",
-            f"❌ watch page ဆွဲမရပါ: {type(e).__name__}\n\n"
-            f"❌ Could not fetch the watch page: {type(e).__name__}")
+        # v6.13.2: retry against the "Loading..." wall with a shared cookie
+        # session, and follow meta-refresh redirects — the real page is
+        # served intermittently.
+        html = ""
+        last_err = None
+        for _ in range(3):
+            try:
+                r = client.get(url, headers={"User-Agent": WATCH_UA},
+                               timeout=timeout)
+                r.raise_for_status()
+                html = r.text
+                last_err = None
+            except Exception as e:
+                last_err = e
+                time.sleep(5)
+                continue
+            mr = re.search(
+                r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+'
+                r'content=["\']\d+;\s*url=([^"\']+)', html, re.I)
+            if mr:
+                url = urljoin(url, mr.group(1).strip())
+                continue
+            if _looks_like_loading_wall(html):
+                time.sleep(5)
+                continue
+            break
+        if last_err is not None:
+            raise WatchError(
+                "fetch_fail",
+                f"❌ watch page ဆွဲမရပါ: {type(last_err).__name__}\n\n"
+                f"❌ Could not fetch the watch page: {type(last_err).__name__}")
     finally:
         if own:
             client.close()
@@ -151,6 +187,14 @@ def fetch_watch_embeds(watch_url: str, season=None, episode=None,
                       "ခဏ block ထားတာ ဖြစ်နိုင်ပါတယ်, ၁၀-၁၅ မိနစ်ကြာမှ ပြန်စမ်းပါ.\n\n"
                       "❌ The site is showing a bot-check page — the VPS IP "
                       "may be temporarily blocked; try again in 10-15 minutes.")
+        elif _looks_like_loading_wall(html):
+            # v6.13.2: still walled after 3 retries
+            detail = ("❌ site က 'Loading...' ပဲ ပြနေပါတယ် (3 ကြိမ် စမ်းပြီးပြီ) — "
+                      "VPS ကို JavaScript check ခံနေရတာပါ. ၁၀-၁၅ မိနစ်ကြာမှ "
+                      "ပြန်စမ်းပါ, (သို့) တခြား title စမ်းကြည့်ပါ.\n\n"
+                      "❌ The site keeps showing its 'Loading...' wall after "
+                      "3 tries — it's putting the VPS through a JavaScript "
+                      "check. Try again in 10-15 minutes or try another title.")
         else:
             detail = ("❌ ဒီ page မှာ video server ရှာမရပါ "
                       f"(page title: {ptitle}).\n\n"
