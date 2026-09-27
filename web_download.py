@@ -721,23 +721,23 @@ def _is_unsupported_url(e: Exception) -> bool:
     return "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__
 
 
-# --- v6.11.0: video-host embed fast-path ---------------------------------
-# Blog/streaming pages (e.g. WP video blogs) usually iframe the real video
-# host (streamtape, doodstream, filemoon, ...). yt-dlp's generic page
-# analysis on such pages is slow and often hangs on datacenter IPs; handing
-# yt-dlp the embed URL directly is much faster and more reliable.
-_VIDEO_EMBED_HOSTS = (
-    "streamtape.com", "strtape.cloud",
-    "doodstream.com", "dood.", "d000d.com", "doood.",
-    "filemoon.", "voe.sx",
-    "mixdrop.", "upstream.to", "streamhide.", "guccihide.",
-    "vidoza.", "uqload.", "mp4upload.com", "sendvid.com",
+# --- v6.11.1: deep embed resolution --------------------------------------
+# Video-blog pages iframe the real host; the embed page often carries the
+# .m3u8/.mp4 URL in plain HTML (e.g. turbovidhls). Resolving one level deep
+# and handing yt-dlp the direct media URL is far faster and more reliable
+# than generic page analysis. ?tape=N servers that are JS-walled are skipped
+# in favor of sibling tapes that expose direct media.
+_AD_HOSTS = (
+    "tsyndicate.com", "magsrv.com", "doubleclick.net",
+    "googlesyndication.com", "googleadservices.com", "adnxs.com",
+    "criteo.", "taboola.com", "outbrain.com", "popads", "popcash",
+    "adcash",
 )
-_EMBED_SCAN_TIMEOUT = 15
+_EMBED_FETCH_TIMEOUT = 15
 
 
-def _embed_srcs(html: str) -> "list[str]":
-    """Extract known video-host iframe/embed URLs from page HTML."""
+def _page_iframes(html: str) -> "list[str]":
+    """All absolute iframe/embed/video srcs, minus ad servers."""
     found: "list[str]" = []
     for m in re.finditer(
             r'<(?:iframe|embed|video)[^>]+src=["\']([^"\']+)["\']',
@@ -748,33 +748,80 @@ def _embed_srcs(html: str) -> "list[str]":
         if not src.startswith("http"):
             continue
         host = src.split("/", 3)[2].lower()
-        if any(h in host for h in _VIDEO_EMBED_HOSTS):
-            if src not in found:
-                found.append(src)
+        if any(a in host for a in _AD_HOSTS):
+            continue
+        if src not in found:
+            found.append(src)
     return found
 
 
-async def _scan_page_embeds(url: str) -> "list[str]":
-    """Fetch a page and return direct video-host embed URLs (may be empty).
+def _direct_media_urls(html: str) -> "list[str]":
+    """Scrape direct .m3u8/.mp4 URLs from HTML (handles \\/ escapes)."""
+    clean = html.replace("\\/", "/")
+    found: "list[str]" = []
+    for pat in (r'(https?://[^\s"\']+?\.m3u8(?:[^\s"\']*))',
+                r'(https?://[^\s"\']+?\.mp4(?:[^\s"\']*))'):
+        for m in re.finditer(pat, clean, re.IGNORECASE):
+            u = m.group(1)
+            if u not in found:
+                found.append(u)
+    return found
 
-    Fast (single GET, 15s cap) and never raises — failures return [].
-    """
+
+async def _fetch_html(url: str,
+                      timeout: int = _EMBED_FETCH_TIMEOUT) -> str:
+    async with httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; "
+                                   "Win64; x64) Chrome/126.0"},
+            timeout=timeout, follow_redirects=True) as c:
+        r = await c.get(url)
+        if "html" not in r.headers.get("content-type", ""):
+            return ""
+        return r.text
+
+
+async def _resolve_embeds(url: str) -> "tuple[list[str], list[str]]":
+    """Return (direct media urls, embed page urls). Never raises."""
     try:
         if looks_like_direct_file(url):
-            return []
-        async with httpx.AsyncClient(
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; "
-                                       "Win64; x64) Chrome/126.0"},
-                timeout=_EMBED_SCAN_TIMEOUT,
-                follow_redirects=True) as c:
-            r = await c.get(url)
-            ctype = r.headers.get("content-type", "")
-            if "html" not in ctype:
-                return []
-            return _embed_srcs(r.text)
+            return [], []
+        html = await _fetch_html(url)
+        if not html:
+            return [], []
+        media: "list[str]" = []
+        embeds: "list[str]" = []
+        for iframe in _page_iframes(html):
+            try:
+                ehtml = await _fetch_html(iframe)
+            except Exception:
+                continue
+            for mu in _direct_media_urls(ehtml):
+                if mu not in media:
+                    media.append(mu)
+            if iframe not in embeds:
+                embeds.append(iframe)
+        # the page itself may carry the media URL directly
+        for mu in _direct_media_urls(html):
+            if mu not in media:
+                media.append(mu)
+        return media, embeds
     except Exception as e:
-        print(f"⚠️ embed scan failed ({e}) — generic extraction ဆက်မယ်")
-        return []
+        print(f"⚠️ embed resolve failed ({e}) — generic extraction ဆက်မယ်")
+        return [], []
+
+
+def _tape_variants(url: str) -> "list[str]":
+    """This WP video theme lists servers as ?tape=1/2/3 — the pasted tape may
+    be JS-walled, so also try its siblings (pasted one first)."""
+    m = re.search(r"([?&]tape=)\d+", url)
+    if not m:
+        return [url]
+    out = [url]
+    for n in ("1", "2", "3"):
+        v = url[:m.start()] + m.group(1) + n + url[m.end():]
+        if v not in out:
+            out.append(v)
+    return out
 
 
 async def download_web(url: str, tmpdir: str, quality: str = "high",
@@ -899,13 +946,32 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     # iframes first and hand them to yt-dlp directly. Generic page analysis
     # on blog/streaming pages is slow and often hangs on datacenter IPs.
     is_yt = _is_youtube(url)
-    candidates = [url]
-    if not is_yt:
-        embeds = await _scan_page_embeds(url)
-        if embeds:
-            print(f"⚡ embed fast-path: {len(embeds)} host(s) — "
-                  f"{embeds[0][:70]}", flush=True)
-            candidates = embeds + [url]
+    # v6.11.1: deep embed resolution — direct media URLs first, then embed
+    # pages, then the page URL itself (per ?tape= server variant).
+    candidates: "list[str]" = []
+    if is_yt:
+        candidates = [url]
+    else:
+        # direct media from ANY server first (a JS-walled pasted tape is
+        # skipped in favor of a sibling that exposes the file), then embed
+        # pages, then the page URLs themselves as the last resort.
+        variants = _tape_variants(url)
+        all_media: "list[str]" = []
+        all_embeds: "list[str]" = []
+        for variant in variants:
+            media, embeds = await _resolve_embeds(variant)
+            if media:
+                print(f"⚡ direct media: {len(media)} url(s) — "
+                      f"{media[0][:70]}", flush=True)
+            for u in media:
+                if u not in all_media:
+                    all_media.append(u)
+            for u in embeds:
+                if u not in all_embeds:
+                    all_embeds.append(u)
+        candidates = all_media + all_embeds + variants
+    if not candidates:
+        candidates = [url]
     # yt-dlp stops at the first client that extracts without error even with
     # zero formats, so try clients as separate full attempts (cheap: no
     # download happens when formats are empty).

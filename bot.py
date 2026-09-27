@@ -4768,7 +4768,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         "started": time.time(), "cancel_event": w_cancel,
                         "kind": "web",
                     }
-                    # v6.11.0: watchdog — yt-dlp extraction reports no
+                    # v6.11.1: watchdog — yt-dlp extraction reports no
                     # progress, so show elapsed time instead of a frozen
                     # "စတင်နေပါတယ်..." while it grinds.
                     w_t0 = time.time()

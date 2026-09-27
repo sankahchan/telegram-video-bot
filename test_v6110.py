@@ -1,9 +1,11 @@
-"""v6.11.0 tests — embed fast-path, single-attempt non-YouTube, cancel, watchdog.
+"""v6.11.x tests — deep embed resolution, tape variants, candidate loop.
 
-- _embed_srcs: extracts known video-host iframes, ignores ads/other hosts
-- _scan_page_embeds: mocked HTTP — html/non-html/exception paths
-- download_web (FakeYDL): embed tried BEFORE page URL; unsupported embed ->
-  next candidate; non-YouTube = single client attempt; cancel honored
+- _page_iframes: all iframes minus ad hosts, protocol-relative, dedup
+- _direct_media_urls: m3u8/mp4 scraping incl. \\/ escapes
+- _tape_variants: ?tape=N sibling expansion
+- _resolve_embeds (mocked httpx): media + embed extraction
+- download_web (FakeYDL): candidate order, unsupported->next, single
+  client attempt for non-YouTube, cancel honored
 Run: python3 test_v6110.py
 """
 import asyncio
@@ -30,74 +32,76 @@ def check(name, cond, extra=""):
         print(f"  ❌ {name} {extra}")
 
 
-# ---------- _embed_srcs ----------
-print("== _embed_srcs ==")
-HTML = """
-<html><body>
-<iframe src="https://streamtape.com/e/vxxAj906xWHDew/"></iframe>
-<iframe src="//doodstream.com/e/abc123"></iframe>
-<iframe src="https://a.magsrv.com/iframe.php?idzone=5736398"></iframe>
-<iframe src="https://www.youtube.com/embed/xyz"></iframe>
-<iframe src="/local/player.html"></iframe>
-<video src="https://filemoon.sx/e/vid1"></video>
-<iframe src="https://streamtape.com/e/vxxAj906xWHDew/"></iframe>
-</body></html>"""
-srcs = wd._embed_srcs(HTML)
-check("finds streamtape", any("streamtape.com/e/vxxAj906xWHDew" in s for s in srcs), srcs)
-check("protocol-relative -> https", any(s == "https://doodstream.com/e/abc123" for s in srcs), srcs)
-check("finds filemoon video tag", any("filemoon.sx/e/vid1" in s for s in srcs), srcs)
-check("ignores ad iframe", not any("magsrv" in s for s in srcs))
-check("ignores youtube iframe", not any("youtube" in s for s in srcs))
-check("ignores relative src", not any("local/player" in s for s in srcs))
-check("dedups", len(srcs) == len(set(srcs)) == 3, srcs)
-check("empty html -> []", wd._embed_srcs("<html></html>") == [])
-
-# ---------- _scan_page_embeds (mocked httpx) ----------
-print("== _scan_page_embeds ==")
-
-
-class _FakeResp:
-    def __init__(self, text, ctype="text/html"):
-        self.text = text
-        self.headers = {"content-type": ctype}
-
-
-class _FakeClient:
-    def __init__(self, resp=None, exc=None):
-        self._resp = resp
-        self._exc = exc
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def get(self, url):
-        if self._exc:
-            raise self._exc
-        return self._resp
-
-
 def _run(coro):
     return asyncio.run(coro)
 
 
-orig_client = wd.httpx.AsyncClient
+# ---------- _page_iframes ----------
+print("== _page_iframes ==")
+HTML = """
+<html><body>
+<IFRAME SRC="https://hglink.to/e/hosj6oztfdr5" FRAMEBORDER=0></IFRAME>
+<iframe src="https://turbovidhls.com/t/68d006bb304dd"></iframe>
+<iframe src="//doodstream.com/e/abc123"></iframe>
+<iframe src="https://a.magsrv.com/iframe.php?idzone=1"></iframe>
+<iframe src="https://tsyndicate.com/iframes2/x.html"></iframe>
+<iframe src="/local/player.html"></iframe>
+<iframe src="https://turbovidhls.com/t/68d006bb304dd"></iframe>
+</body></html>"""
+srcs = wd._page_iframes(HTML)
+check("finds uppercase IFRAME", any("hglink.to/e/hosj6oztfdr5" in s for s in srcs), srcs)
+check("finds turbovid", any("turbovidhls.com" in s for s in srcs), srcs)
+check("protocol-relative -> https", any(s == "https://doodstream.com/e/abc123" for s in srcs), srcs)
+check("ignores magsrv ad", not any("magsrv" in s for s in srcs))
+check("ignores tsyndicate ad", not any("tsyndicate" in s for s in srcs))
+check("ignores relative src", not any("local/player" in s for s in srcs))
+check("dedups", len(srcs) == len(set(srcs)) == 3, srcs)
+check("empty html -> []", wd._page_iframes("<html></html>") == [])
+
+# ---------- _direct_media_urls ----------
+print("== _direct_media_urls ==")
+MHTML = ('<script>var src="https:\\/\\/cdn3.turboviplay.com\\/data3\\/ab\\/ab.m3u8?x=1";</script>'
+         '<video><source src="https://cdn.example.com/v.mp4"></video>')
+mu = wd._direct_media_urls(MHTML)
+check("m3u8 unescaped", "https://cdn3.turboviplay.com/data3/ab/ab.m3u8?x=1" in mu, mu)
+check("mp4 found", "https://cdn.example.com/v.mp4" in mu, mu)
+check("none -> []", wd._direct_media_urls("<html>hi</html>") == [])
+
+# ---------- _tape_variants ----------
+print("== _tape_variants ==")
+tv = wd._tape_variants("https://javhd.icu/video/x/?tape=2")
+check("tape variants", tv == [
+    "https://javhd.icu/video/x/?tape=2",
+    "https://javhd.icu/video/x/?tape=1",
+    "https://javhd.icu/video/x/?tape=3"], tv)
+check("no tape -> [url]", wd._tape_variants("https://example.com/v") == ["https://example.com/v"])
+check("&tape form", wd._tape_variants("https://e.com/v?a=1&tape=2") == [
+    "https://e.com/v?a=1&tape=2", "https://e.com/v?a=1&tape=1", "https://e.com/v?a=1&tape=3"])
+
+# ---------- _resolve_embeds (mocked _fetch_html) ----------
+print("== _resolve_embeds ==")
+EMBED_HTML = '<html><body><video src="https://cdn3.turboviplay.com/data3/ab/ab.m3u8"></video></body></html>'
+
+
+async def _fake_fetch(url, timeout=15):
+    if "videopage" in url:
+        return HTML
+    if "turbovidhls" in url or "hglink" in url or "doodstream" in url:
+        return EMBED_HTML
+    raise ConnectionError("down")
+
+
+orig_fetch = wd._fetch_html
+wd._fetch_html = _fake_fetch
 try:
-    wd.httpx.AsyncClient = lambda **k: _FakeClient(_FakeResp(HTML))
-    got = _run(wd._scan_page_embeds("https://example.com/v"))
-    check("scan returns embeds", len(got) == 3, got)
-
-    wd.httpx.AsyncClient = lambda **k: _FakeClient(_FakeResp("%PDF-1.4", "application/pdf"))
-    check("non-html -> []", _run(wd._scan_page_embeds("https://example.com/f")) == [])
-
-    wd.httpx.AsyncClient = lambda **k: _FakeClient(exc=ConnectionError("down"))
-    check("exception -> []", _run(wd._scan_page_embeds("https://example.com/v")) == [])
-
-    check("direct file skipped", _run(wd._scan_page_embeds("https://example.com/v.mp4")) == [])
+    media, embeds = _run(wd._resolve_embeds("https://example.com/videopage"))
+    check("media resolved", media == ["https://cdn3.turboviplay.com/data3/ab/ab.m3u8"], (media, embeds))
+    check("embeds listed", len(embeds) == 3 and all(e.startswith("https://") for e in embeds), embeds)
+    check("no ad embeds", not any("magsrv" in e or "tsyndicate" in e for e in embeds))
+    m2, e2 = _run(wd._resolve_embeds("https://example.com/v.mp4"))
+    check("direct file skipped", (m2, e2) == ([], []))
 finally:
-    wd.httpx.AsyncClient = orig_client
+    wd._fetch_html = orig_fetch
 
 # ---------- _is_unsupported_url ----------
 print("== _is_unsupported_url ==")
@@ -139,28 +143,40 @@ class FakeYDL:
 
 
 orig_ydl = yt_dlp.YoutubeDL
-orig_scan = wd._scan_page_embeds
+orig_resolve = wd._resolve_embeds
+orig_tape = wd._tape_variants
 orig_verify = wd.verify_web_video
 orig_norm = wd.normalize_web_video
 yt_dlp.YoutubeDL = FakeYDL
 wd.verify_web_video = lambda p: (True, "")
 wd.normalize_web_video = lambda p: p
+wd._tape_variants = lambda url: [url]  # isolate candidate-order tests
 try:
-    async def fake_scan(url):
-        return ["https://streambad.com/e/badembed", "https://streamtape.com/e/good123"]
+    async def fake_resolve(url):
+        return (["https://cdn.example.com/direct.m3u8"],
+                ["https://streambad.com/e/badembed"])
 
-    wd._scan_page_embeds = fake_scan
+    wd._resolve_embeds = fake_resolve
     calls.clear()
     path, title = _run(wd.download_web("https://example.com/videopage", tmp))
-    check("embed tried before page", calls[0] == "https://streambad.com/e/badembed", calls)
-    check("unsupported embed -> next candidate", calls[1] == "https://streamtape.com/e/good123", calls)
-    check("page url never needed", len(calls) == 2, calls)
+    check("direct media tried first", calls[0] == "https://cdn.example.com/direct.m3u8", calls)
+    check("only one call on success", len(calls) == 1, calls)
     check("returns path", os.path.exists(path) and title == "T")
 
+    async def fake_resolve2(url):
+        return ([], ["https://streambad.com/e/badembed"])
+
+    wd._resolve_embeds = fake_resolve2
+    calls.clear()
+    path, title = _run(wd.download_web("https://example.com/videopage", tmp))
+    check("unsupported embed -> page url next",
+          calls == ["https://streambad.com/e/badembed", "https://example.com/videopage"], calls)
+
     # non-YouTube: single client attempt on hard failure
-    async def no_embeds(url):
-        return []
-    wd._scan_page_embeds = no_embeds
+    async def no_media(url):
+        return ([], [])
+
+    wd._resolve_embeds = no_media
     calls.clear()
     try:
         _run(wd.download_web("https://example.com/boompage", tmp))
@@ -170,7 +186,7 @@ try:
     check("non-YouTube single attempt (no 6x clients)", len(calls) == 1, calls)
 
     # cancel between candidates
-    wd._scan_page_embeds = fake_scan
+    wd._resolve_embeds = fake_resolve
     calls.clear()
     ev = threading.Event()
     ev.set()
@@ -181,22 +197,24 @@ try:
         check("cancel raises", True)
     check("cancel: no yt-dlp call started", calls == [], calls)
 
-    # YouTube keeps 6 client variants (retryable error -> 6 clients x 2 fmts)
-    wd._scan_page_embeds = no_embeds
+    # YouTube keeps 6 client variants (retryable error -> 6 clients x 2 fmts
+    # + 1 _diagnose_formats probe)
+    wd._resolve_embeds = no_media
     calls.clear()
     try:
         _run(wd.download_web("https://youtube.com/watch?v=retrypage", tmp))
         check("yt retryable raises", False)
     except Exception as e:
         check("yt retryable raises", "429" in str(e), str(e)[:60])
-    # 12 = 6 clients x 2 fmts in the retry loop, +1 = _diagnose_formats probe
-    check("YouTube still tries 6 clients", len(calls) == 13 and
-          all(c == "https://youtube.com/watch?v=retrypage" for c in calls), calls)
+    check("YouTube still tries 6 clients",
+          len(calls) == 13 and all(c == "https://youtube.com/watch?v=retrypage" for c in calls),
+          len(calls))
 finally:
     yt_dlp.YoutubeDL = orig_ydl
-    wd._scan_page_embeds = orig_scan
+    wd._resolve_embeds = orig_resolve
+    wd._tape_variants = orig_tape
     wd.verify_web_video = orig_verify
     wd.normalize_web_video = orig_norm
 
-print(f"\n{ PASS} passed, {FAIL} failed")
+print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)
