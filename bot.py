@@ -2149,6 +2149,168 @@ async def sstream_pick(q, tmdb_id: int, idx: int):
         source=src, provider=rec["provider"]))
 
 
+# --------------------------------------------- watch-page links (v6.9.0)
+_WATCH_SOURCES: dict = {}  # (uid, wkey) -> {sources,sizes,title,media_type,
+#                            season,episode,provider,ts}
+_WATCH_TTL = 600
+
+
+async def _watch_offer(uid: int, chat_id: int, watch_url: str,
+                       season=None, episode=None, status_msg=None):
+    """Resolve a free-streaming watch page (andyday.sx ...) to provider
+    embeds, skip dead/unsupported servers, show the quality+size picker."""
+    import httpx
+    from embed import (probe_source_size, pick_best, stream_src_label,
+                       filter_oversize, provider_looks_dead, fmt_size, MAX_MB)
+    from watch import (parse_watch_url, fetch_watch_embeds,
+                       extract_embed_sources, WatchError, WATCH_UA)
+    parsed = parse_watch_url(watch_url)
+    if not parsed:
+        await bot_client.send_message(
+            chat_id, "❌ watch link ပုံစံ မမှန်ပါ.\n\n❌ Not a watch link.")
+        return
+    media_type = parsed["media_type"]
+    season = season or parsed["season"] or (1 if media_type == "tv" else None)
+    episode = episode or parsed["episode"] or (1 if media_type == "tv" else None)
+    tag = "🎬" if media_type == "movie" else "📺"
+    suffix = f" S{season}E{episode}" if media_type == "tv" else ""
+    now = time.time()
+    for k in [k for k, v in _WATCH_SOURCES.items()
+              if now - v.get("ts", 0) > _WATCH_TTL]:
+        _WATCH_SOURCES.pop(k, None)
+    try:
+        if status_msg is None:
+            status_msg = await bot_client.send_message(
+                chat_id, f"{tag} 🔍 watch page ဖတ်နေပါတယ်...")
+        else:
+            try:
+                await status_msg.edit_text(f"{tag} 🔍 watch page ဖတ်နေပါတယ်...")
+            except Exception:
+                pass
+        title, embeds = await asyncio.to_thread(
+            fetch_watch_embeds, watch_url, season, episode)
+        label = sources = sizes = None
+        dropped = 0
+        skipped, unsupported = [], []
+        client = httpx.Client(headers={"User-Agent": WATCH_UA}, timeout=25,
+                              follow_redirects=True, trust_env=False)
+        try:
+            for server_name, embed_url in embeds:
+                try:
+                    plabel, psources = await asyncio.to_thread(
+                        extract_embed_sources, embed_url, client)
+                except WatchError as e:
+                    if e.kind == "unsupported":
+                        unsupported.append(server_name)
+                    else:
+                        skipped.append(server_name)
+                    continue
+                probe_list = psources[:_STREAM_PROBE_LIMIT]
+                psizes = await asyncio.gather(
+                    *[asyncio.to_thread(probe_source_size, s)
+                      for s in probe_list])
+                kept, ksizes, pdrop = filter_oversize(probe_list, list(psizes))
+                if kept and provider_looks_dead(ksizes):
+                    skipped.append(server_name)
+                    continue
+                if kept:
+                    label, sources, sizes, dropped = \
+                        plabel, kept, ksizes, pdrop
+                    break
+                skipped.append(server_name)
+        finally:
+            client.close()
+        if sources is None:
+            raise WatchError(
+                "no_stream",
+                "❌ ဒီ page အတွက် ရတဲ့ stream မရှိပါ — "
+                "တခြား title စမ်းကြည့်ပါ.\n\n"
+                "❌ No usable streams from this page — try another title.")
+        best = pick_best(sources)
+        wkey = hashlib.sha1(
+            f"{uid}|{watch_url}|{now}".encode()).hexdigest()[:10]
+        _WATCH_SOURCES[(uid, wkey)] = {
+            "sources": sources, "sizes": sizes, "title": title,
+            "media_type": media_type, "season": season, "episode": episode,
+            "provider": label, "ts": now}
+        kb = []
+        for i, (s, z) in enumerate(zip(sources, sizes)):
+            kb.append([InlineKeyboardButton(
+                stream_src_label(s, z, s is best),
+                callback_data=f"wstream:{wkey}:{i}")])
+        note = ""
+        if skipped:
+            skip_txt = ", ".join(skipped)
+            note += (f"\n⚠️ {skip_txt} — link အသေမို့ ကျော်လိုက်ပါတယ်.\n"
+                     f"⚠️ Skipped dead links from {skip_txt}.")
+        if unsupported:
+            note += (f"\nℹ️ {', '.join(unsupported)} — မရသေးတဲ့ server.\n"
+                     f"ℹ️ Unsupported server(s): {', '.join(unsupported)}.")
+        if dropped:
+            cap_txt = fmt_size(MAX_MB * 1048576)
+            note += (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
+                     f"⚠️ {dropped} dropped (over {cap_txt}).")
+        try:
+            await status_msg.edit_text(
+                f"{tag} **{title}{suffix}**\n🔗 via {label} (watch page)\n\n"
+                f"Quality + file size ရွေးပါ / pick one:{note}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb))
+        except Exception:
+            pass
+    except Exception as e:
+        traceback.print_exc()
+        msg = getattr(e, "message", None)
+        try:
+            await status_msg.edit_text(
+                msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
+async def wstream_pick(q, wkey: str, idx: int):
+    """User picked a quality+size from the watch-page picker -> download it."""
+    uid = q.from_user.id
+    chat_id = q.message.chat_id
+    rec = _WATCH_SOURCES.get((uid, wkey))
+    if not rec or idx >= len(rec["sources"]):
+        await q.answer("⏰ သက်တမ်းကုန်သွားပါပြီ — ပြန်ရွေးပေးပါ.\n\n"
+                       "⏰ Expired — please pick again.", show_alert=True)
+        return
+    src = rec["sources"][idx]
+    _WATCH_SOURCES.pop((uid, wkey), None)
+    try:
+        await q.edit_message_text(
+            f"🎬 **{rec['title']}** — ⬇️ ဒေါင်းနေပါတယ်...",
+            parse_mode="Markdown")
+    except Exception:
+        pass
+    asyncio.create_task(_stream_download(
+        uid, chat_id, 0, rec["media_type"], rec["title"],
+        rec["season"], rec["episode"], q.message,
+        source=src, provider=rec["provider"]))
+
+
+async def watchlink_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/watchlink <watch-page url> [season episode] — download from a
+    free-streaming watch page (e.g. andyday.sx)."""
+    if not allowed(update):
+        return
+    uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "အသုံးပြုပုံ / usage:\n"
+            "/watchlink <watch-page link>\n"
+            "/watchlink <watch-page link> 1 2   (TV: season episode)\n\n"
+            "ဥပမာ / e.g.:\n/watchlink https://andyday.sx/watch/tv-lioness-3gs9fwmn")
+        return
+    season = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+    episode = int(args[2]) if len(args) > 2 and args[2].isdigit() else None
+    await _watch_offer(uid, chat_id, args[0], season, episode)
+
+
 async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str,
                            title: str, season, episode, status_msg=None,
                            source: dict | None = None, provider: str | None = None):
@@ -3451,6 +3613,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m:
         await sstream_pick(q, int(m.group(1)), int(m.group(2)))
         return
+    m = re.fullmatch(r"wstream:([0-9a-f]{10}):(\d+)", q.data or "")
+    if m:
+        await wstream_pick(q, m.group(1), int(m.group(2)))
+        return
     m = re.fullmatch(r"dl:([0-9a-f]{40})", q.data or "")
     if m:
         await dl_pick(q, m.group(1))
@@ -4358,7 +4524,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Web video links
     web_urls = extract_web_urls(text)
 
+    # Free-streaming watch pages (andyday.sx ...) -> dedicated watch flow
+    from watch import is_watch_url
+    watch_urls = [u for u in web_urls if is_watch_url(u)]
+    web_urls = [u for u in web_urls if u not in watch_urls]
+    for wu in watch_urls:
+        await _watch_offer(uid, chat_id, wu)
+
     if not tg_jobs and not web_urls:
+        if watch_urls:
+            return
         await emsg.reply_text(
             "❌ Link ပုံစံ မှားနေပါတယ်.\n"
             "Telegram: https://t.me/c/1234567890/123\n"
@@ -4912,6 +5087,7 @@ def main():
         ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
         ("tv", tv_cmd),
         ("stream", cmd_stream),
+        ("watchlink", watchlink_cmd),
         ("search", search_cmd),
         ("setconvert", setconvert_cmd),
         ("subs", subs_cmd),
@@ -4928,7 +5104,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
         on_button,
-        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|sstream:|stream:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|sstream:|wstream:|stream:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,
