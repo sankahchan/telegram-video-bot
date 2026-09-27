@@ -1,5 +1,5 @@
 """Direct file-host downloads: MEGA, MediaFire, pCloud, Dropbox, WeTransfer,
-Send-protocol shares (send.vis.ee)."""
+Send-protocol shares (send.vis.ee), Mega4Upload, UploadNow."""
 
 import asyncio
 import html as _html
@@ -31,7 +31,7 @@ class FileHostError(Exception):
 
 def detect_filehost(url):
     """Return 'mega' | 'mediafire' | 'pcloud' | 'dropbox' | 'wetransfer' |
-    'send' | 'mega4upload', or None."""
+    'send' | 'mega4upload' | 'uploadnow', or None."""
     try:
         host = urllib.parse.urlparse(url or "").netloc.lower()
     except Exception:
@@ -50,6 +50,8 @@ def detect_filehost(url):
         return "send"
     if "mega4upload" in host:
         return "mega4upload"
+    if "uploadnow.io" in host:
+        return "uploadnow"
     return None
 
 
@@ -228,7 +230,8 @@ def _pcloud_direct(page_url):
 
 async def download_filehost(url, tmpdir, progress_cb=None,
                             loop=None, tag="📥"):
-    """Download a MEGA / MediaFire / pCloud / Dropbox / WeTransfer / Send file.
+    """Download a MEGA / MediaFire / pCloud / Dropbox / WeTransfer / Send /
+    Mega4Upload / UploadNow file.
     Returns (path, title)."""
     kind = detect_filehost(url)
     if kind == "mega":
@@ -258,6 +261,12 @@ async def download_filehost(url, tmpdir, progress_cb=None,
         path, title = await download_direct_file(
             direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
         return path, title
+    if kind == "uploadnow":
+        from web_download import download_direct_file
+        direct, fname, _fsize = await asyncio.to_thread(_uploadnow_direct, url)
+        path, _title = await download_direct_file(
+            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+        return path, fname
     if kind == "wetransfer":
         from web_download import download_direct_file
         direct = await asyncio.to_thread(_wetransfer_direct, url)
@@ -499,6 +508,228 @@ def _mega4upload_direct(url):
     except Exception as e:
         raise FileHostError(
             "network", "❌ Mega4Upload ဆက်သွယ်မရပါ: %s" % str(e)[:150])
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- UploadNow
+
+_UPLOADNOW_API = "https://uploadnow.io/api"
+# Public Firebase *web* API key shipped inside uploadnow.io's own JS bundle
+# (not a secret — every visitor's browser uses it for anonymous sign-in).
+# If the site rotates it, _uploadnow_fb_key() re-scrapes a fresh one from the
+# live bundle, so downloads keep working without a code change.
+_UPLOADNOW_FB_KEY = ["AIzaSyB1SU4XZ9ryZjgtlYLU2yX2OBrAM6ajSWo"]
+_UPLOADNOW_TOKEN_TTL = 3300  # Firebase idTokens live ~1h; refresh well inside
+_uploadnow_token_cache = {"token": None, "at": 0.0}
+
+_UPLOADNOW_VIDEO_EXTS = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v",
+                         ".ts", ".m2ts", ".wmv", ".flv", ".3gp")
+
+
+def _uploadnow_share_code(url):
+    """Extract the share code from uploadnow.io URLs.
+
+    Supported shapes:
+      https://uploadnow.io/f/<code>
+      https://uploadnow.io/<locale>/share?utm_source=<code>  (redirect target)
+    """
+    try:
+        parts = urllib.parse.urlparse(url or "")
+    except Exception:
+        return None
+    if "uploadnow.io" not in (parts.netloc or "").lower():
+        return None
+    m = re.fullmatch(r"/f/([A-Za-z0-9_-]+)", (parts.path or "").rstrip("/"))
+    if m:
+        return m.group(1)
+    q = urllib.parse.parse_qs(parts.query or "")
+    src = (q.get("utm_source") or [""])[0].strip()
+    return src or None
+
+
+def _uploadnow_fb_key():
+    """Return a working Firebase web API key, re-scraping if the cached one dies."""
+    import httpx
+    if _UPLOADNOW_FB_KEY[0]:
+        return _UPLOADNOW_FB_KEY[0]
+    try:
+        s = httpx.Client(headers={"User-Agent": "Mozilla/5.0"},
+                         follow_redirects=True, timeout=30, trust_env=False)
+        try:
+            home = s.get("https://uploadnow.io/").text
+            m = re.search(r"/_next/static/chunks/pages/_app-([a-f0-9]+)[.]js",
+                          home)
+            if not m:
+                raise FileHostError(
+                    "network",
+                    "❌ UploadNow စာမျက်နှာ ဖတ်မရပါ — နောက်မှ ပြန်စမ်းပါ.\n"
+                    "❌ Could not read the UploadNow page — try again later.")
+            js = s.get(
+                "https://cdn.uploadnow.io/_next/static/chunks/pages/_app-"
+                + m.group(1) + ".js").text
+            k = re.search(r"AIza[0-9A-Za-z_-]{20,}", js)
+            if not k:
+                raise FileHostError(
+                    "network",
+                    "❌ UploadNow key ရှာမရပါ — နောက်မှ ပြန်စမ်းပါ.\n"
+                    "❌ UploadNow key lookup failed — try again later.")
+            _UPLOADNOW_FB_KEY[0] = k.group(0)
+            return k.group(0)
+        finally:
+            s.close()
+    except FileHostError:
+        raise
+    except Exception as e:
+        raise FileHostError(
+            "network",
+            "❌ UploadNow ဆက်သွယ်မရပါ: " + str(e)[:120] + "\n"
+            "❌ UploadNow request failed.")
+
+
+def _uploadnow_anon_token():
+    """Mint a Firebase anonymous idToken — exactly what uploadnow.io's own
+    web client does for logged-out visitors."""
+    import time
+    import httpx
+    now = time.time()
+    if (_uploadnow_token_cache["token"]
+            and now - _uploadnow_token_cache["at"] < _UPLOADNOW_TOKEN_TTL):
+        return _uploadnow_token_cache["token"]
+    key = _uploadnow_fb_key()
+    try:
+        s = httpx.Client(headers={"User-Agent": "Mozilla/5.0"},
+                         timeout=30, trust_env=False)
+        try:
+            for attempt in (0, 1):
+                r = s.post(
+                    "https://identitytoolkit.googleapis.com/v1/accounts:signUp",
+                    params={"key": key}, json={"returnSecureToken": True})
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {}
+                tok = (data or {}).get("idToken")
+                if tok:
+                    _uploadnow_token_cache.update(token=tok, at=now)
+                    return tok
+                if "API_KEY_INVALID" in r.text and attempt == 0:
+                    _UPLOADNOW_FB_KEY[0] = ""  # force re-scrape, retry once
+                    key = _uploadnow_fb_key()
+                    continue
+                break
+        finally:
+            s.close()
+    except FileHostError:
+        raise
+    except Exception as e:
+        raise FileHostError(
+            "network",
+            "❌ UploadNow ဆက်သွယ်မရပါ: " + str(e)[:120] + "\n"
+            "❌ UploadNow request failed.")
+    raise FileHostError(
+        "network",
+        "❌ UploadNow login မရပါ — နောက်မှ ပြန်စမ်းပါ.\n"
+        "❌ UploadNow sign-in failed — try again later.")
+
+
+def _uploadnow_pick(files):
+    """Pick the best file from a share: largest video, else largest file."""
+    vids = [f for f in files
+            if str(f.get("name") or "").lower().endswith(_UPLOADNOW_VIDEO_EXTS)]
+    pool = vids or files
+    return max(pool, key=lambda f: int(f.get("size") or 0))
+
+
+def _uploadnow_direct(url):
+    """Resolve an uploadnow.io share link to (direct_url, filename, size_bytes).
+
+    Flow (verified 2026-09-27, no login):
+      Firebase anonymous signUp -> idToken
+      POST /api/file/search/folder-content {folderId} -> files[]
+      POST /api/file/downloads/links {folderGroups:[...]} -> {"url": signed}
+    The signed URL is a pre-signed bucket URL — a plain GET downloads the bytes.
+    """
+    import httpx
+    code = _uploadnow_share_code(url)
+    if not code:
+        raise FileHostError(
+            "dead",
+            "❌ UploadNow link ပုံစံ မမှန်ပါ.\n"
+            "❌ Unrecognized UploadNow link format.")
+    token = _uploadnow_anon_token()
+    try:
+        s = httpx.Client(
+            headers={"User-Agent": "Mozilla/5.0",
+                     "Authorization": "Bearer " + token,
+                     "Origin": "https://uploadnow.io",
+                     "Referer": "https://uploadnow.io/"},
+            follow_redirects=True, timeout=30, trust_env=False)
+    except Exception as e:
+        raise FileHostError(
+            "network",
+            "❌ UploadNow ဆက်သွယ်မရပါ: " + str(e)[:120])
+    try:
+        r = s.post(_UPLOADNOW_API + "/file/search/folder-content",
+                   json={"folderId": code, "limit": 100,
+                         "sortField": "updateDate", "sortDirection": "desc"})
+        if r.status_code == 403:
+            raise FileHostError(
+                "code",
+                "🔒 ဒီ UploadNow link က password လိုပါတယ် — bot က မဖွင့်နိုင်ပါ.\n"
+                "🔒 This UploadNow link needs a password — the bot can't open it.")
+        if r.status_code == 404:
+            raise FileHostError(
+                "dead",
+                "❌ ဒီ UploadNow link က သက်တမ်းကုန်ပြီ (သို့) ဖျက်လိုက်ပါပြီ.\n"
+                "❌ This UploadNow link has expired or was deleted.")
+        r.raise_for_status()
+        files = (r.json() or {}).get("files") or []
+        if not files:
+            raise FileHostError(
+                "dead",
+                "❌ ဒီ UploadNow link မှာ file မရှိပါ.\n"
+                "❌ No files in this UploadNow link.")
+        f = _uploadnow_pick(files)
+        fid = f.get("id")
+        name = f.get("name") or "uploadnow_file"
+        size = int(f.get("size") or 0)
+        if not fid:
+            raise FileHostError(
+                "dead",
+                "❌ UploadNow file id ရမလာပါ.\n"
+                "❌ Could not read the UploadNow file id.")
+        if size > _MAX_MB * 1048576:
+            mb = size / 1048576
+            raise FileHostError(
+                "too_big",
+                "📦 File ကြီးလွန်းပါတယ် (%.0fMB > %dMB) - Telegram က 2GB ထိပဲ "
+                "ပို့လို့ရပါတယ်.\n\n"
+                "📦 File too large (%.0fMB > %dMB) - Telegram caps at 2GB."
+                % (mb, _MAX_MB, mb, _MAX_MB))
+        r2 = s.post(_UPLOADNOW_API + "/file/downloads/links",
+                    json={"folderGroups": [{"selectedFiles": [fid],
+                                            "selectedFolders": [],
+                                            "folderId": code}],
+                            "stream": False})
+        r2.raise_for_status()
+        direct = (r2.json() or {}).get("url")
+        if not direct:
+            raise FileHostError(
+                "dead",
+                "❌ UploadNow direct link ရမလာပါ.\n"
+                "❌ No download link returned.")
+        return direct, name, size
+    except FileHostError:
+        raise
+    except Exception as e:
+        raise FileHostError(
+            "network",
+            "❌ UploadNow ဆက်သွယ်မရပါ: " + str(e)[:120] + "\n"
+            "❌ UploadNow request failed.")
     finally:
         try:
             s.close()

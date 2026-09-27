@@ -4237,7 +4237,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "❌ Link ပုံစံ မှားနေပါတယ်.\n"
             "Telegram: https://t.me/c/1234567890/123\n"
             "Web: YouTube / TikTok / Facebook / Instagram / X link\n"
-            "File: Google Drive / MEGA / MediaFire / pCloud / Dropbox / WeTransfer / send.vis.ee / Mega4Upload link"
+            "File: Google Drive / MEGA / MediaFire / pCloud / Dropbox / WeTransfer / send.vis.ee / Mega4Upload / UploadNow link"
         )
         return
 

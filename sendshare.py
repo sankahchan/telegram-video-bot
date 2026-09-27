@@ -65,7 +65,8 @@ def _parse_share_url(url):
     # some clients paste the key after the last '#'; anything before is noise
     key = frag.split("#")[-1] if frag else ""
     m = re.fullmatch(r"[A-Za-z0-9\-_]{16,64}", key or "")
-    fid = (parts.path.rsplit("/", 1)[-1] or "").strip()
+    # strip trailing slashes: ".../download/<fid>/" must work like ".../download/<fid>"
+    fid = (parts.path.rstrip("/").rsplit("/", 1)[-1] or "").strip()
     if not m or not re.fullmatch(r"[A-Za-z0-9\-_]+", fid or ""):
         raise SendShareError(
             "dead",

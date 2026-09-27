@@ -44,6 +44,7 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 🎬 **`/stream <title>`** — movie/series streaming download (v6.8.0): TMDB search → auto-resolves via VidNest / VixSrc / VidEasy / VidRock / 2Embed / VidCore / VidLink / VidSrc (needs free `TMDB_API_KEY` in `.env`)
 - 🌐 **More video sites** (v6.8.0) — VK (vk.com) + Bluesky (bsky.app) videos via yt-dlp
 - 📁 **More file hosts** (v6.8.0) — Dropbox / WeTransfer / send.vis.ee / Mega4Upload (joins MEGA / MediaFire / pCloud / Google Drive)
+- 📁 **UploadNow** (v6.8.1) — uploadnow.io share links, anonymous download (no login needed)
 
 > ⚠️ **Torrent note:** some VPS providers prohibit torrent traffic (copyright complaints can get the VPS suspended) and torrenting shares bandwidth with other services on the box. Seeding is disabled by the bot (`--seed-time=0`), but prefer legal torrents.
 
