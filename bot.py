@@ -2167,6 +2167,44 @@ _WATCH_PROBE_EXEC = concurrent.futures.ThreadPoolExecutor(
     max_workers=32, thread_name_prefix="watchprobe")
 
 
+async def _deliver_watch_status(chat_id, status_msg, text, timeout=20,
+                                **kwargs):
+    """Terminal status delivery for the watch flow — never ends silently.
+
+    v6.14.1: on 2026-09-28 the browser cleared the Cloudflare wall and all
+    batch-1 probes finished, yet the user never got the quality picker and
+    the journal showed nothing after 'probe done: vidnest'. The final
+    _safe_status_edit failed (flaky MTProto / flood ban) and its False
+    return was ignored, so _watch_offer returned with no message and no
+    log. Now: try the edit; if it fails, send a fresh message instead;
+    log every outcome. Returns the message carrying the text, or None.
+    Never raises (CancelledError still propagates).
+    """
+    from watch import _safe_status_edit
+    try:
+        if await _safe_status_edit(status_msg, text, timeout=timeout,
+                                   **kwargs):
+            print("⌛ watch: terminal status delivered via edit", flush=True)
+            return status_msg
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    print("⚠️ watch: status edit failed — sending fresh message", flush=True)
+    try:
+        m = await asyncio.wait_for(
+            bot_client.send_message(chat_id, text, **kwargs),
+            timeout=timeout)
+        print("⌛ watch: terminal status delivered via send", flush=True)
+        return m
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"⛔ watch: FAILED to deliver terminal status: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return None
+
+
 async def _pick_watch_server(embeds, try_server, progress_cb=None,
                              batch: int = 4, per_server_timeout: float = 60):
     """Probe watch-page servers in parallel batches, cascade priority kept.
@@ -2305,6 +2343,12 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
 
             found, bskipped, bun = await _pick_watch_server(
                 embeds, _try_server, _progress)
+            # v6.14.1: close the logging gap — on 2026-09-28 the journal
+            # showed batch-1 probes done and then nothing, with no way to
+            # tell whether a server was ok or the picker delivery failed.
+            print(f"⌛ watch: probing done — ok={found is not None}, "
+                  f"skipped={len(bskipped)}, unsupported={len(bun)}",
+                  flush=True)
             skipped.extend(bskipped)
             unsupported.extend(bun)
             if found is not None:
@@ -2341,8 +2385,11 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
             cap_txt = fmt_size(MAX_MB * 1048576)
             note += (f"\n⚠️ {dropped} ခု ကြီးလွန်းလို့ ({cap_txt}+) ဖယ်ထားပါတယ်.\n"
                      f"⚠️ {dropped} dropped (over {cap_txt}).")
-        await _safe_status_edit(
-            status_msg,
+        # v6.14.1: terminal delivery — if the edit fails, send a fresh
+        # message instead of ending silently (2026-09-28: picker never
+        # reached the user, journal showed nothing after the probes).
+        await _deliver_watch_status(
+            chat_id, status_msg,
             f"{tag} **{title}{suffix}**\n🔗 via {label} (watch page)\n\n"
             f"Quality + file size ရွေးပါ / pick one:{note}",
             parse_mode="Markdown",
@@ -2350,15 +2397,15 @@ async def _watch_offer(uid: int, chat_id: int, watch_url: str,
     except Exception as e:
         traceback.print_exc()
         msg = getattr(e, "message", None)
-        await _safe_status_edit(
-            status_msg,
+        await _deliver_watch_status(
+            chat_id, status_msg,
             msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
     except BaseException as e:
         # v6.13.5: never die silently — on 2026-09-28 the probe task died
         # with no journal output at all ('server 4/14' stuck 5.5h).
         traceback.print_exc()
-        await _safe_status_edit(
-            status_msg,
+        await _deliver_watch_status(
+            chat_id, status_msg,
             f"❌ {tag} ရပ်သွားပါတယ် — link ပြန်ပို့ပေးပါ.\n\n"
             f"❌ Interrupted ({type(e).__name__}) — please resend the link.")
         raise
