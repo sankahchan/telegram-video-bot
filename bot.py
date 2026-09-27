@@ -3017,6 +3017,7 @@ async def deadwatch_job(context: ContextTypes.DEFAULT_TYPE):
                             InlineKeyboardButton(
                                 "⬇️ ဒေါင်း",
                                 callback_data=f"dl:{ih}")]]))
+                    await asyncio.sleep(1)  # v6.11.2: pace bursts
                 except Exception as ex:
                     print(f"👀 deadwatch notify failed: {ex}")
 
@@ -3511,6 +3512,7 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
                             f["chat_id"],
                             f"📡 {f['name']}\n🆕 {it['title']}\n"
                             f"⬇️ ဒေါင်းချင်ရင် /search နဲ့ ရှာပါ")
+                        await asyncio.sleep(1)  # v6.11.2: pace bursts
                     except Exception as e:
                         print(f"📡 follow notify failed: {e}")
                         break
@@ -3529,6 +3531,7 @@ async def follow_job(context: ContextTypes.DEFAULT_TYPE):
                             f["chat_id"],
                             f"📡 {f['name']}\n⏭️ skip: {it['title'][:60]}\n"
                             f"{skip_reason}")
+                        await asyncio.sleep(1)  # v6.11.2: pace bursts
                     except Exception:
                         pass
                     continue
@@ -4624,8 +4627,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ok, fail, queued = 0, 0, 0
     collected = []  # zip mode
 
+    _wp_last = [0.0, -1]  # v6.11.2: flood-hardening — never edit faster
+    # than once per 5s, skip duplicate pct (yt-dlp hook already throttles
+    # to 3s; this is belt-and-suspenders for every caller)
     async def web_progress(tag, pct):
         try:
+            now = time.time()
+            if pct == _wp_last[1] or now - _wp_last[0] < 5:
+                return
+            _wp_last[0], _wp_last[1] = now, pct
             await status.edit_text(f"{tag} ⬇️ {pct}%")
         except Exception:
             pass
@@ -4855,16 +4865,23 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     continue
                 traceback.print_exc()
                 fail += 1
-                if isinstance(e, FileHostError):
-                    # bilingual message already — send as-is, no prefix
-                    await emsg.reply_text(e.message)
-                else:
-                    friendly = friendly_web_error(e)
-                    if friendly:
-                        await emsg.reply_text(friendly)
+                # v6.11.2: if Telegram itself is flood-limiting us
+                # (RetryAfter), the error message can't be delivered — log
+                # it instead of crashing the handler with a traceback.
+                try:
+                    if isinstance(e, FileHostError):
+                        # bilingual message already — send as-is, no prefix
+                        await emsg.reply_text(e.message)
                     else:
-                        err = str(e)[:300]
-                        await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
+                        friendly = friendly_web_error(e)
+                        if friendly:
+                            await emsg.reply_text(friendly)
+                        else:
+                            err = str(e)[:300]
+                            await emsg.reply_text(f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {err}")
+                except Exception as re:
+                    print(f"⚠️ error reply not delivered "
+                          f"({type(re).__name__}: {str(re)[:100]})")
 
         # zip mode: everything into one archive
         if collected and s["zip"]:
