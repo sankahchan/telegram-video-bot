@@ -31,32 +31,48 @@ check("fmt 1GB -> 1GB", fmt_size(1073741824) == "1GB")
 check("fmt 2.5GB", fmt_size(int(2.5 * 1073741824)) == "2.5GB")
 
 
-# ---- probe_source_size (mocked transport) ----
+# ---- probe_source_size (mocked transport; Range GET is tried first) ----
 def mkclient(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def h_head_ok(request):
-    assert request.method == "HEAD", request.method
+def h_range_authoritative(request):
+    # server lies on HEAD, tells truth on Range GET
+    if request.method == "GET":
+        assert request.headers.get("range") == "bytes=0-0", request.headers.get("range")
+        return httpx.Response(206, headers={"content-range": "bytes 0-0/5555555555"})
     return httpx.Response(200, headers={"content-length": "12345678"})
 
 
-c = mkclient(h_head_ok)
-check("probe HEAD content-length",
-      probe_source_size({"url": "https://x.test/v.mp4"}, client=c) == 12345678)
+c = mkclient(h_range_authoritative)
+check("probe prefers content-range over HEAD",
+      probe_source_size({"url": "https://x.test/v.mp4"}, client=c) == 5555555555)
 c.close()
 
 
-def h_range_fallback(request):
-    if request.method == "HEAD":
-        return httpx.Response(405, headers={})
-    assert request.headers.get("range") == "bytes=0-0", request.headers.get("range")
-    return httpx.Response(206, headers={"content-range": "bytes 0-0/987654"})
+def h_range_ignored(request):
+    # no Range support: 200 + content-length on the GET itself
+    if request.method == "GET":
+        return httpx.Response(200, headers={"content-length": "777"},
+                              content=iter([b"x"]))
+    return httpx.Response(405, headers={})
 
 
-c = mkclient(h_range_fallback)
-check("probe Range fallback -> content-range",
-      probe_source_size({"url": "https://x.test/v.mp4"}, client=c) == 987654)
+c = mkclient(h_range_ignored)
+check("probe Range-ignored -> GET content-length",
+      probe_source_size({"url": "https://x.test/v.mp4"}, client=c) == 777)
+c.close()
+
+
+def h_range_403(request):
+    if request.method == "GET":
+        return httpx.Response(403, headers={})
+    return httpx.Response(200, headers={"content-length": "424242"})
+
+
+c = mkclient(h_range_403)
+check("probe Range 403 -> HEAD fallback",
+      probe_source_size({"url": "https://x.test/v.mp4"}, client=c) == 424242)
 c.close()
 
 
@@ -119,7 +135,11 @@ check("label plain",
 check("label unknown size",
       stream_src_label({"quality": "auto"}, None) == "📥 auto • —")
 check("label blank quality",
-      stream_src_label({"quality": "  "}, 500) == "📥 auto • 500B")
+      stream_src_label({"quality": "  "}, 500) == "⚠️ auto • 500B")
+check("label small warns",
+      stream_src_label({"quality": "360p"}, 952832) == "⚠️ 360p • 930.5KB")
+check("label small best warns",
+      stream_src_label({"quality": "1080p"}, 952832, True) == "⚠️ 1080p • 930.5KB")
 
 
 # ---- filter_oversize ----

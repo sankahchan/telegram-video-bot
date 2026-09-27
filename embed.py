@@ -97,8 +97,9 @@ def fmt_size(n) -> str:
 
 
 def probe_source_size(source: dict, client=None, timeout: float = 10) -> int | None:
-    """Content-Length via HEAD (fallback: 1-byte Range GET). HLS -> None (skip).
-    Blocking — run in a thread. Pass an httpx.Client in tests."""
+    """True file size: 1-byte Range GET first (content-range total is
+    authoritative even when HEAD lies), HEAD as fallback. HLS -> None (skip).
+    Bodies are never read — headers only. Blocking; run in a thread."""
     url = (source or {}).get("url") or ""
     if not url or ".m3u8" in url.lower():
         return None
@@ -113,14 +114,6 @@ def probe_source_size(source: dict, client=None, timeout: float = 10) -> int | N
                               follow_redirects=True, trust_env=False)
     try:
         try:
-            r = client.head(url, headers=headers, timeout=timeout)
-        except Exception:
-            return None
-        if r.status_code == 200:
-            cl = r.headers.get("content-length")
-            if cl and cl.isdigit():
-                return int(cl)
-        try:
             h2 = dict(headers)
             h2["Range"] = "bytes=0-0"
             # stream: headers only, never read the body (a 200 may be gigabytes)
@@ -129,20 +122,36 @@ def probe_source_size(source: dict, client=None, timeout: float = 10) -> int | N
                               r2.headers.get("content-range") or "")
                 if m:
                     return int(m.group(1))
-                cl = r2.headers.get("content-length")
-                if r2.status_code == 200 and cl and cl.isdigit():
-                    return int(cl)
+                if r2.status_code == 200:
+                    cl = r2.headers.get("content-length")
+                    if cl and cl.isdigit():
+                        return int(cl)
         except Exception:
             pass
+        try:
+            r = client.head(url, headers=headers, timeout=timeout)
+        except Exception:
+            return None
+        if r.status_code == 200:
+            cl = r.headers.get("content-length")
+            if cl and cl.isdigit():
+                return int(cl)
         return None
     finally:
         if own:
             client.close()
 
 
+SMALL_WARN_BYTES = 5 * 1048576  # below this, a "movie" file is suspicious
+
+
 def stream_src_label(src: dict, size, is_best: bool = False) -> str:
-    """Button label for the quality+size picker, e.g. '⭐ 1080p • 1.4GB'."""
-    icon = "⭐" if is_best else "📥"
+    """Button label for the quality+size picker, e.g. '⭐ 1080p • 1.4GB'.
+    Suspiciously small files (< 5MB) get a ⚠️ instead of ⭐/📥."""
+    if size is not None and size < SMALL_WARN_BYTES:
+        icon = "⚠️"
+    else:
+        icon = "⭐" if is_best else "📥"
     q = ((src.get("quality") or "auto").strip()) or "auto"
     return f"{icon} {q} • {fmt_size(size)}"
 
