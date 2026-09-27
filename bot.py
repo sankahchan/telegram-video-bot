@@ -298,6 +298,7 @@ HELP_OVERVIEW = (
     "/follow — series RSS, episode အသစ် auto-download\n"
     "/unfollow /follows — ⬇️ auto ↔ 🔔 notify-only ပြောင်းလို့ရ\n"
     "/tv — bot ထဲကနေ series ရှာ + follow (website မလို)\n"
+    "/stream — movie/series streaming download\n"
     "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး\n"
     "/search — torrent အကုန် ရှာ + ဒေါင်း\n"
     "/subs — subtitle (.srt) ရှာ (ဘာသာစကား ရွေး)\n"
@@ -632,6 +633,18 @@ HELP_TOPICS = {
         "  /ytcheck https://youtu.be/d33A264UMqo\n\n"
         "→ URL ပေးရင် အဲဒီ video ကို probe လုပ်ပြီး format diagnosis�ါ ပြမယ်.\n"
         "YouTube မရတိုင်း ဒါကို အရင် run ပြီး ရလဒ် ပို့ပေးပါ."
+    ),
+    "stream": (
+        "🎬 /stream — movie/series streaming download\n\n"
+        "အသုံးပြုပုံ / Usage:\n"
+        "  /stream <title>\n\n"
+        "ဥပမာ / Example:\n"
+        "  /stream dune\n"
+        "  /stream breaking bad\n\n"
+        "• TMDB မှာ ရှာပြီး ရွေးချယ်ပါ\n"
+        "• series ဆို Season/Episode ထည့်ပေးပါ (ဥပမာ: 1 2)\n"
+        "• VidNest/VixSrc/VidEasy/... provider တွေကနေ auto-resolve\n"
+        "• TMDB_API_KEY လိုပါတယ် (themoviedb.org — အခမဲ့)"
     ),
     "xtimeline": (
         "🐦 /xtimeline — X profile ရဲ့ latest video tweets ဒေါင်း\n\n"
@@ -1954,6 +1967,119 @@ async def tv_pick(q, tvmaze_id: int):
         pass
 
 
+
+# ------------------------------------------------- movie/series streaming (/stream, v6.8.0)
+_STREAM_TITLES: dict = {}   # (uid, tmdb_id) -> (title, media_type)
+_stream_pending: dict = {}  # uid -> {tmdb_id, title, chat_id, ts}
+
+
+async def cmd_stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """TMDB မှာ ရှာ → streaming provider တွေကနေ ဒေါင်း: /stream <title>."""
+    if not allowed(update):
+        await update.message.reply_text("⛔ ဒီ bot ကို သုံးခွင့်မရှိပါ။")
+        return
+    uid = update.effective_user.id
+    query = " ".join(context.args or []).strip()
+    if not query:
+        await update.message.reply_text(
+            "🎬 /stream — movie/series streaming download\n\n"
+            "အသုံးပြုပုံ / Usage:\n"
+            "  /stream <title>\n\n"
+            "ဥပမာ / Example:\n"
+            "  /stream dune\n"
+            "  /stream breaking bad")
+        return
+    try:
+        from embed import tmdb_search
+        results = await asyncio.to_thread(tmdb_search, query)
+    except Exception as e:
+        msg = getattr(e, "message", None) or str(e)
+        await update.message.reply_text(
+            msg if "🔑" in msg
+            else f"❌ ရှာမရပါ: {type(e).__name__}: {str(e)[:200]}")
+        return
+    if not results:
+        await update.message.reply_text(
+            f"❌ '{query}' — ဘာမှ မတွေ့ပါ.\n\n"
+            f"❌ Nothing found for '{query}'.")
+        return
+    kb = []
+    for r in results:
+        icon = "🎬" if r["media_type"] == "movie" else "📺"
+        year = f" ({r['year']})" if r["year"] else ""
+        _STREAM_TITLES[(uid, r["tmdb_id"])] = (r["title"], r["media_type"])
+        kb.append([InlineKeyboardButton(
+            f"{icon} {r['title']}{year}",
+            callback_data=f"stream:{r['media_type']}:{r['tmdb_id']}")])
+    await update.message.reply_text(
+        f"🎬 '{query}' — ရွေးချယ်ပါ / pick one:",
+        reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def stream_pick(q, media_type: str, tmdb_id: int):
+    uid = q.from_user.id
+    chat_id = q.message.chat_id
+    title, _mt = _STREAM_TITLES.get((uid, tmdb_id), (f"tmdb:{tmdb_id}", media_type))
+    if media_type == "tv":
+        _stream_pending[uid] = {"tmdb_id": tmdb_id, "title": title,
+                                "chat_id": chat_id, "ts": time.time()}
+        await q.edit_message_text(
+            f"📺 **{title}**\n\n"
+            "Season နဲ့ Episode ထည့်ပေးပါ (ဥပမာ: `1 2` = S1E2).\n"
+            "Enter season and episode (e.g. `1 2` = S1E2).",
+            parse_mode="Markdown")
+        return
+    await q.edit_message_text(f"🎬 **{title}** — stream ရှာနေပါတယ်...",
+                              parse_mode="Markdown")
+    asyncio.create_task(
+        _stream_download(uid, chat_id, tmdb_id, "movie", title, None, None, q.message))
+
+
+async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str,
+                           title: str, season, episode, status_msg=None):
+    from embed import resolve_and_download
+    tag = "🎬"
+    try:
+        if status_msg is None:
+            status_msg = await bot_client.send_message(chat_id, f"{tag} stream ရှာနေပါတယ်...")
+        else:
+            try:
+                await status_msg.edit_text(f"{tag} stream ရှာနေပါတယ်...")
+            except Exception:
+                pass
+        tmpdir = tempfile.mkdtemp(prefix="stream_")
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _mkprog():
+                async def _do(pct):
+                    try:
+                        await status_msg.edit_text(f"{tag} 📥 {pct:.0f}%")
+                    except Exception:
+                        pass
+                return lambda _tag, pct: _do(pct)
+
+            path, provider = await resolve_and_download(
+                tmdb_id, media_type, title, season, episode, tmpdir,
+                progress_cb=_mkprog(), loop=loop, tag=tag)
+            suffix = f" S{season}E{episode}" if media_type == "tv" else ""
+            caption = f"{tag} {title}{suffix}\n🔗 via {provider}"
+            await status_msg.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
+            await deliver(uid, chat_id, path, caption, "video", False, True,
+                          log_kind="stream", status=status_msg)
+            print(f"✅ stream ပို့ပြီးပါပြီ -> {uid} ({provider})")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception as e:
+        traceback.print_exc()
+        msg = getattr(e, "message", None)
+        try:
+            await status_msg.edit_text(
+                msg if msg else f"❌ {tag} မအောင်မြင်ပါ: {type(e).__name__}: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
 # ------------------------------------------------- general torrent search
 _SEARCH_CACHE: dict = {}  # key -> {"uid": int, "query": str, "results": [...]}
 _SEARCH_SHOW = 12  # buttons per search message
@@ -3195,6 +3321,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m:
         await tv_pick(q, int(m.group(1)))
         return
+    m = re.fullmatch(r"stream:(movie|tv):(\d+)", q.data or "")
+    if m:
+        await stream_pick(q, m.group(1), int(m.group(2)))
+        return
     m = re.fullmatch(r"dl:([0-9a-f]{40})", q.data or "")
     if m:
         await dl_pick(q, m.group(1))
@@ -4026,6 +4156,19 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
     chat_id = update.effective_chat.id
 
     # /find ရွေးချယ်မှု (နံပါတ်)
+    # /stream TV season/episode input ("1 2")
+    if uid in _stream_pending:
+        m = re.fullmatch(r"(\d+)\s+(\d+)", text)
+        pend = _stream_pending.pop(uid, None)
+        if m and pend and time.time() - pend["ts"] < 600:
+            s_no, e_no = int(m.group(1)), int(m.group(2))
+            await emsg.reply_text(
+                f"📺 **{pend['title']}** S{s_no}E{e_no} — stream ရှာနေပါတယ်...",
+                parse_mode="Markdown")
+            asyncio.create_task(_stream_download(
+                uid, chat_id, pend["tmdb_id"], "tv", pend["title"],
+                s_no, e_no))
+            return
     if text.isdigit() and uid in pending_finds:
         results = pending_finds[uid]
         i = int(text)
@@ -4094,7 +4237,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "❌ Link ပုံစံ မှားနေပါတယ်.\n"
             "Telegram: https://t.me/c/1234567890/123\n"
             "Web: YouTube / TikTok / Facebook / Instagram / X link\n"
-            "File: Google Drive / MEGA / MediaFire / pCloud link"
+            "File: Google Drive / MEGA / MediaFire / pCloud / Dropbox / WeTransfer / send.vis.ee / Mega4Upload link"
         )
         return
 
@@ -4642,6 +4785,7 @@ def main():
         ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
         ("follow", follow_cmd), ("unfollow", unfollow_cmd), ("follows", follows_cmd),
         ("tv", tv_cmd),
+        ("stream", cmd_stream),
         ("search", search_cmd),
         ("setconvert", setconvert_cmd),
         ("subs", subs_cmd),
@@ -4658,7 +4802,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(
         on_button,
-        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
+        pattern=r"^(q:(low|high):|drive:(up|no):|tv:|stream:|dl:|dlc:|dlx:|ssort:|sbest:|dwdel:|menu:|subm:|subs:).*"))
     app.add_handler(
         MessageHandler(
             tg_filters.ChatType.PRIVATE & tg_filters.TEXT & ~tg_filters.COMMAND,

@@ -764,10 +764,10 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             tiktok_error = e
             print(f"⚠️ TikTok cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
 
-    # File hosts (MEGA / MediaFire / pCloud) BEFORE yt-dlp — yt-dlp has no
-    # extractors for them, so they download directly instead. (Google Drive
-    # needs no special case: yt-dlp ships a GoogleDrive extractor.)
-    # v6.5.0
+    # File hosts (MEGA / MediaFire / pCloud / Dropbox / WeTransfer / Send /
+    # Mega4Upload) BEFORE yt-dlp — yt-dlp has no extractors for them, so they
+    # download directly instead. (Google Drive needs no special case: yt-dlp
+    # ships a GoogleDrive extractor.) v6.5.0, extended v6.8.0
     from filehost import detect_filehost, download_filehost
     if detect_filehost(url):
         # FileHostError propagates unwrapped so callers can branch on

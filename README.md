@@ -41,6 +41,9 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 📱 **iOS-friendly remux** — torrent videos are auto-converted to MP4 + AAC (video stream-copied, no quality loss) so they play with sound on iPhone — fixes silent HEVC/MKV downloads with EAC3/DTS audio
 - 🔎 **`/search <text>`** — search torrents in-bot (movies / music / series / software via TPB index); tap a result to download, sorted by seeders
 - 🔍 **`/tv <series name>`** — search series in-bot (TVMaze) and follow it; new episodes auto-download via EZTV (1080p preferred, every 30 min). `/follow <rss-url>` also still works (e.g. showRSS feeds)
+- 🎬 **`/stream <title>`** — movie/series streaming download (v6.8.0): TMDB search → auto-resolves via VidNest / VixSrc / VidEasy / VidRock / 2Embed / VidCore / VidLink / VidSrc (needs free `TMDB_API_KEY` in `.env`)
+- 🌐 **More video sites** (v6.8.0) — VK (vk.com) + Bluesky (bsky.app) videos via yt-dlp
+- 📁 **More file hosts** (v6.8.0) — Dropbox / WeTransfer / send.vis.ee / Mega4Upload (joins MEGA / MediaFire / pCloud / Google Drive)
 
 > ⚠️ **Torrent note:** some VPS providers prohibit torrent traffic (copyright complaints can get the VPS suspended) and torrenting shares bandwidth with other services on the box. Seeding is disabled by the bot (`--seed-time=0`), but prefer legal torrents.
 
