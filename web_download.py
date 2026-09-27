@@ -54,6 +54,12 @@ def _is_youtube(url: str) -> bool:
     return "youtube.com" in lu or "youtu.be" in lu
 
 
+class WebDownloadCancelled(Exception):
+    """Raised when the user cancels an in-progress web download
+    (/dl -> ❌). Not an error — callers report it as a clean cancel."""
+    CANCEL_MSG = ("❌ ရပ်လိုက်ပါပြီ.\n\n❌ Download cancelled.")
+
+
 _pot_ok = None            # last reachability result
 _pot_checked_at = 0.0     # monotonic() when last probed
 _POT_RECHECK_S = 60.0     # re-probe at most once a minute
@@ -223,15 +229,20 @@ DIRECT_MAX_MB = 1900
 
 
 async def download_direct_file(url: str, tmpdir: str, max_mb: int = DIRECT_MAX_MB,
-                               progress_cb=None, loop=None, tag: str = "📥"):
+                               progress_cb=None, loop=None, tag: str = "📥",
+                               cancel_event=None):
     """Plain HTTP download for direct file links (PDF etc.). Returns (path, filename).
 
     Retries up to 3 times; verifies size against Content-Length when known —
     a truncated file is never returned silently.
+    cancel_event: threading.Event — when set, aborts with WebDownloadCancelled.
     """
     import time
     import urllib.parse
     import urllib.request
+
+    def _cancelled():
+        return cancel_event is not None and cancel_event.is_set()
 
     def _run():
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -270,6 +281,9 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = DIRECT_MAX_M
             done = 0
             with open(path, "wb") as f:
                 while True:
+                    if _cancelled():
+                        raise WebDownloadCancelled(
+                            WebDownloadCancelled.CANCEL_MSG)
                     chunk = resp.read(1024 * 256)
                     if not chunk:
                         break
@@ -290,8 +304,12 @@ async def download_direct_file(url: str, tmpdir: str, max_mb: int = DIRECT_MAX_M
 
     last_err = None
     for attempt in range(3):
+        if _cancelled():
+            raise WebDownloadCancelled(WebDownloadCancelled.CANCEL_MSG)
         try:
             return await asyncio.to_thread(_run)
+        except WebDownloadCancelled:
+            raise  # never retry a user cancel
         except Exception as e:
             if "webpage (HTML)" in str(e) or "ကြီးလွန်းပါတယ်" in str(e):
                 raise  # deterministic — retrying changes nothing
@@ -353,12 +371,16 @@ def pot_extractor_args(url: str) -> dict:
     return {}
 
 
-def _hook(progress_cb, loop, tag):
-    """yt-dlp progress hook -> throttled Telegram status updates."""
+def _hook(progress_cb, loop, tag, cancel_event=None):
+    """yt-dlp progress hook -> throttled Telegram status updates.
+    Raises WebDownloadCancelled (aborts the yt-dlp download) when
+    cancel_event is set."""
     import time
     last = [0.0, -1]  # [last_time, last_pct]
 
     def hook(d):
+        if cancel_event is not None and cancel_event.is_set():
+            raise WebDownloadCancelled(WebDownloadCancelled.CANCEL_MSG)
         if d.get("status") != "downloading":
             return
         total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -691,10 +713,11 @@ def normalize_web_video(path: str) -> str:
 
 async def download_web(url: str, tmpdir: str, quality: str = "high",
                        audio_only: bool = False, progress_cb=None,
-                       loop=None, tag: str = "📥"):
+                       loop=None, tag: str = "📥", cancel_event=None):
     """Download a web video. Returns (file_path, title).
 
     progress_cb: async fn(tag, pct) for status updates.
+    cancel_event: threading.Event — aborts with WebDownloadCancelled.
     """
     try:
         from yt_dlp import YoutubeDL
@@ -729,7 +752,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             item = _pick_x_video(await extract_x_media(url))
             path, _t = await download_direct_file(
                 item["url"], tmpdir, progress_cb=progress_cb,
-                loop=loop, tag=tag)
+                loop=loop, tag=tag, cancel_event=cancel_event)
             ok, reason = await asyncio.to_thread(verify_web_video, path)
             if not ok:
                 raise XMediaError(
@@ -751,7 +774,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             item = extract_tiktok_media(url)
             path, _t = await download_direct_file(
                 item["url"], tmpdir, progress_cb=progress_cb,
-                loop=loop, tag=tag)
+                loop=loop, tag=tag, cancel_event=cancel_event)
             ok, reason = await asyncio.to_thread(verify_web_video, path)
             if not ok:
                 raise TikTokMediaError(
@@ -773,7 +796,8 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         # FileHostError propagates unwrapped so callers can branch on
         # e.kind (e.g. night queue skips permanent failures).
         return await download_filehost(
-            url, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+            url, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag,
+            cancel_event=cancel_event)
 
     if audio_only:
         fmts = ["ba/b", "b"]
@@ -787,7 +811,8 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
     def _run(fmt, player_clients):
         opts = _base_opts(outtmpl, fmt, player_clients, url)
         if progress_cb and loop:
-            opts["progress_hooks"] = [_hook(progress_cb, loop, tag)]
+            opts["progress_hooks"] = [
+                _hook(progress_cb, loop, tag, cancel_event)]
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             if not info:
@@ -885,7 +910,7 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
                 print(f"✅ YouTube fallback via {src} — direct download", flush=True)
                 path, _t = await download_direct_file(
                     media_url, tmpdir, progress_cb=progress_cb,
-                    loop=loop, tag=tag)
+                    loop=loop, tag=tag, cancel_event=cancel_event)
                 ok, reason = await asyncio.to_thread(verify_web_video, path)
                 if not ok:
                     raise _YTFallbackError(

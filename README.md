@@ -46,6 +46,7 @@ Download restricted Telegram videos/photos/files through **your own account sess
 - 🌐 **More video sites** (v6.8.0) — VK (vk.com) + Bluesky (bsky.app) videos via yt-dlp
 - 📁 **More file hosts** (v6.8.0) — Dropbox / WeTransfer / send.vis.ee / Mega4Upload (joins MEGA / MediaFire / pCloud / Google Drive)
 - 📁 **UploadNow** (v6.8.1) — uploadnow.io share links, anonymous download (no login needed)
+- ⏹️ **`/dl` cancel** (v6.10.0) — active downloads (torrent + web + stream) with live % and a ❌ button each; cancelling a web/stream download aborts it mid-way (yt-dlp hook / HTTP chunk checks), MEGA finishes then discards
 
 > ⚠️ **Torrent note:** some VPS providers prohibit torrent traffic (copyright complaints can get the VPS suspended) and torrenting shares bandwidth with other services on the box. Seeding is disabled by the bot (`--seed-time=0`), but prefer legal torrents.
 

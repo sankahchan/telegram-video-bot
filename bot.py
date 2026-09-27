@@ -59,7 +59,7 @@ from web_download import (  # noqa: E402
     extract_web_urls, download_web, probe_size,
     download_direct_file, looks_like_direct_file, direct_file_kind,
     pot_server_hint, storyboard_only, yt_pipeline_status,
-    _diagnose_formats, web_info,
+    _diagnose_formats, web_info, WebDownloadCancelled,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux, ios_container_ok  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
@@ -2332,6 +2332,9 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
 
             def _mkprog():
                 async def _do(pct):
+                    ent = _active_downloads.get(s_token)
+                    if ent is not None:
+                        ent["pct"] = int(pct)
                     try:
                         await status_msg.edit_text(f"{tag} 📥 {pct:.0f}%")
                     except Exception:
@@ -2339,14 +2342,30 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
                 return lambda _tag, pct: _do(pct)
 
             suffix = f" S{season}E{episode}" if media_type == "tv" else ""
-            if source is None:
-                path, provider = await resolve_and_download(
-                    tmdb_id, media_type, title, season, episode, tmpdir,
-                    progress_cb=_mkprog(), loop=loop, tag=tag)
-            else:
-                path = await asyncio.to_thread(
-                    download_embed, source, f"{title}{suffix}", tmpdir,
-                    _mkprog(), loop, tag)
+            # v6.10.0: register stream downloads for /dl cancel
+            s_token = "stream" + hashlib.sha1(
+                f"{uid}|{title}|{time.time()}".encode()).hexdigest()[:12]
+            s_cancel = threading.Event()
+            _active_downloads[s_token] = {
+                "uid": uid, "chat_id": chat_id,
+                "name": f"{title}{suffix}"[:60], "total": 0, "done": 0,
+                "started": time.time(), "cancel_event": s_cancel,
+                "kind": "stream",
+            }
+            try:
+                if source is None:
+                    path, provider = await resolve_and_download(
+                        tmdb_id, media_type, title, season, episode, tmpdir,
+                        progress_cb=_mkprog(), loop=loop, tag=tag,
+                        cancel_event=s_cancel)
+                else:
+                    path = await asyncio.to_thread(
+                        download_embed, source, f"{title}{suffix}", tmpdir,
+                        _mkprog(), loop, tag, s_cancel)
+            finally:
+                _active_downloads.pop(s_token, None)
+            if s_cancel.is_set():
+                raise WebDownloadCancelled(WebDownloadCancelled.CANCEL_MSG)
             caption = f"{tag} {title}{suffix}\n🔗 via {provider}"
             await status_msg.edit_text(f"{tag} 📤 ပို့နေပါတယ်...")
             await deliver(uid, chat_id, path, caption, "video", False, True,
@@ -2355,6 +2374,13 @@ async def _stream_download(uid: int, chat_id: int, tmdb_id: int, media_type: str
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
     except Exception as e:
+        if isinstance(e, WebDownloadCancelled):
+            try:
+                await status_msg.edit_text(
+                    str(e) or "❌ ရပ်လိုက်ပါပြီ.\n\n❌ Cancelled.")
+            except Exception:
+                pass
+            return
         traceback.print_exc()
         msg = getattr(e, "message", None)
         try:
@@ -2619,24 +2645,31 @@ async def dl_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if e["uid"] == uid]
     if not mine:
         await update.message.reply_text(
-            "📭 အခု ဒေါင်းနေတဲ့ torrent မရှိပါ.\nNo active torrent downloads.")
+            "📭 အခု ဒေါင်းနေတာ မရှိပါ.\nNo active downloads.")
         return
     now = time.time()
     lines = ["📊 Active downloads:\n"]
     kb = []
+    kind_icon = {"torrent": "🧲", "web": "🌐", "stream": "🎬"}
     for tok, e in mine:
-        total = e["total"] or 1
-        done = e["done"]
-        pct = min(100, int(done / total * 100))
-        el = max(1.0, now - e["started"])
-        speed = done / el
-        eta = (total - done) / speed if speed > 0 else -1
-        eta_s = f"{int(eta // 60)}m{int(eta % 60):02d}s" if eta >= 0 else "…"
+        icon = kind_icon.get(e.get("kind", "torrent"), "📥")
+        pct = e.get("pct")
+        if pct is None:
+            total = e["total"] or 1
+            done = e["done"]
+            pct = min(100, int(done / total * 100))
+            el = max(1.0, now - e["started"])
+            speed = done / el
+            eta = (total - done) / speed if speed > 0 else -1
+            eta_s = f"{int(eta // 60)}m{int(eta % 60):02d}s" if eta >= 0 else "…"
+            detail = (f"{done / 1048576:.0f}/{total / 1048576:.0f}MB · "
+                      f"{speed / 1048576:.1f}MB/s · ETA {eta_s}")
+        else:
+            detail = "❌ နှိပ်ပြီး ရပ်လို့ရပါတယ် / press ❌ to cancel"
         lines.append(
-            f"{_dl_bar(pct)} {pct}%\n"
+            f"{icon} {_dl_bar(pct)} {pct}%\n"
             f"📦 {e['name'][:40]}\n"
-            f"{done / 1048576:.0f}/{total / 1048576:.0f}MB · "
-            f"{speed / 1048576:.1f}MB/s · ETA {eta_s}\n")
+            f"{detail}\n")
         kb.append([InlineKeyboardButton(f"❌ {e['name'][:24]}",
                                        callback_data=f"dlx:{tok}")])
     await update.message.reply_text(
@@ -4725,27 +4758,53 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             f"❌ {tag} " + quota_block_msg(used_q, quota_q))
                         fail += 1
                         continue
-                    if looks_like_direct_file(url) and not detect_filehost(url):
-                        path, title = await download_direct_file(
-                            url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
-                        wk = direct_file_kind(url)
-                    else:
-                        try:
-                            path, title = await download_web(
-                                url, tmpdir, quality=quality or s["quality"],
-                                progress_cb=web_progress, loop=loop, tag=tag)
-                            # file hosts / Drive return arbitrary files — kind
-                            # by extension so zips/docs send correctly
-                            wk = (direct_file_kind(path)
-                                  if (detect_filehost(url) or is_drive_url(url))
-                                  else "video")
-                        except Exception as e:
-                            if "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__:
-                                path, title = await download_direct_file(
-                                    url, tmpdir, progress_cb=web_progress, loop=loop, tag=tag)
-                                wk = direct_file_kind(url)
-                            else:
-                                raise
+                    # v6.10.0: register web downloads for /dl cancel
+                    w_token = "web" + hashlib.sha1(
+                        f"{uid}|{url}|{time.time()}".encode()).hexdigest()[:12]
+                    w_cancel = threading.Event()
+                    _active_downloads[w_token] = {
+                        "uid": uid, "chat_id": chat_id,
+                        "name": url[:60], "total": 0, "done": 0,
+                        "started": time.time(), "cancel_event": w_cancel,
+                        "kind": "web",
+                    }
+                    try:
+                        async def _wprog(tag, pct, _tok=w_token):
+                            ent = _active_downloads.get(_tok)
+                            if ent is not None:
+                                ent["pct"] = pct
+                            await web_progress(tag, pct)
+                        if looks_like_direct_file(url) and not detect_filehost(url):
+                            path, title = await download_direct_file(
+                                url, tmpdir, progress_cb=_wprog, loop=loop,
+                                tag=tag, cancel_event=w_cancel)
+                            wk = direct_file_kind(url)
+                        else:
+                            try:
+                                path, title = await download_web(
+                                    url, tmpdir, quality=quality or s["quality"],
+                                    progress_cb=_wprog, loop=loop, tag=tag,
+                                    cancel_event=w_cancel)
+                                # file hosts / Drive return arbitrary files — kind
+                                # by extension so zips/docs send correctly
+                                wk = (direct_file_kind(path)
+                                      if (detect_filehost(url) or is_drive_url(url))
+                                      else "video")
+                            except Exception as e:
+                                if "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__:
+                                    path, title = await download_direct_file(
+                                        url, tmpdir, progress_cb=_wprog, loop=loop,
+                                        tag=tag, cancel_event=w_cancel)
+                                    wk = direct_file_kind(url)
+                                else:
+                                    raise
+                    finally:
+                        _active_downloads.pop(w_token, None)
+                    if w_cancel.is_set():
+                        # cancel landed after an uninterruptible download
+                        # (e.g. MEGA) finished — discard, don't deliver
+                        raise WebDownloadCancelled(
+                            WebDownloadCancelled.CANCEL_MSG)
                     pp_notes: list = []
                     final, as_audio = await post_process(
                         path, wk, uid, tmpdir, idx, quality=quality,
@@ -4763,6 +4822,14 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     ok += 1
                     print(f"✅ web ပို့ပြီးပါပြီ ({idx}/{n}) -> {uid}")
             except Exception as e:
+                if isinstance(e, WebDownloadCancelled):
+                    # user pressed ❌ in /dl — clean stop, not a failure
+                    try:
+                        await status.edit_text(
+                            str(e) or "❌ ရပ်လိုက်ပါပြီ.\n\n❌ Cancelled.")
+                    except Exception:
+                        pass
+                    continue
                 traceback.print_exc()
                 fail += 1
                 if isinstance(e, FileHostError):

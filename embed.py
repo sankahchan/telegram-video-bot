@@ -241,10 +241,13 @@ def provider_looks_dead(sizes: list) -> bool:
 
 
 def download_embed(source: dict, title: str, tmpdir: str,
-                   progress_cb=None, loop=None, tag: str = "📥") -> str:
+                   progress_cb=None, loop=None, tag: str = "📥",
+                   cancel_event=None) -> str:
     """Download one resolved source via yt-dlp (HLS/mp4). Returns file path.
-    Blocking — run in a thread (progress via progress_cb like download_web)."""
+    Blocking — run in a thread (progress via progress_cb like download_web).
+    cancel_event: threading.Event — aborts with WebDownloadCancelled."""
     from yt_dlp import YoutubeDL
+    from web_download import WebDownloadCancelled  # lazy: no cycle
     url = source["url"]
     headers = {}
     if source.get("referer"):
@@ -266,6 +269,8 @@ def download_embed(source: dict, title: str, tmpdir: str,
     }
     if progress_cb and loop:
         def _hook(d):
+            if cancel_event is not None and cancel_event.is_set():
+                raise WebDownloadCancelled(WebDownloadCancelled.CANCEL_MSG)
             if d.get("status") == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 done = d.get("downloaded_bytes") or 0
@@ -296,7 +301,8 @@ def download_embed(source: dict, title: str, tmpdir: str,
 async def resolve_and_download(tmdb_id: int, media_type: str, title: str,
                                season: int | None, episode: int | None,
                                tmpdir: str, progress_cb=None,
-                               loop=None, tag: str = "📥") -> tuple:
+                               loop=None, tag: str = "📥",
+                               cancel_event=None) -> tuple:
     """Full pipeline: cascade resolve -> pick best -> download.
     Returns (path, provider_label)."""
     label, sources = await asyncio.to_thread(
@@ -307,5 +313,5 @@ async def resolve_and_download(tmdb_id: int, media_type: str, title: str,
     suffix = f" S{season}E{episode}" if media_type == "tv" else ""
     path = await asyncio.to_thread(
         download_embed, best, f"{title}{suffix}", tmpdir,
-        progress_cb, loop, tag)
+        progress_cb, loop, tag, cancel_event)
     return path, label

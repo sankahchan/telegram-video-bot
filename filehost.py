@@ -229,10 +229,11 @@ def _pcloud_direct(page_url):
 # ---------------------------------------------------------------- dispatcher
 
 async def download_filehost(url, tmpdir, progress_cb=None,
-                            loop=None, tag="📥"):
+                            loop=None, tag="📥", cancel_event=None):
     """Download a MEGA / MediaFire / pCloud / Dropbox / WeTransfer / Send /
     Mega4Upload / UploadNow file.
-    Returns (path, title)."""
+    Returns (path, title). cancel_event aborts with WebDownloadCancelled
+    (MEGA itself can't abort mid-stream — the file is discarded instead)."""
     kind = detect_filehost(url)
     if kind == "mega":
         return await asyncio.to_thread(_mega_download, url, tmpdir)
@@ -249,7 +250,8 @@ async def download_filehost(url, tmpdir, progress_cb=None,
 
         try:
             return await asyncio.to_thread(
-                download_sendshare, url, tmpdir, 1900, _sprog)
+                download_sendshare, url, tmpdir, 1900, _sprog,
+                cancel_event)
         except SendShareError as e:
             # map onto FileHostError kinds; dead/too_big/password never requeue
             kind2 = {"dead": "dead", "too_big": "too_big",
@@ -259,19 +261,22 @@ async def download_filehost(url, tmpdir, progress_cb=None,
         from web_download import download_direct_file
         direct = await asyncio.to_thread(_mega4upload_direct, url)
         path, title = await download_direct_file(
-            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag,
+            cancel_event=cancel_event)
         return path, title
     if kind == "uploadnow":
         from web_download import download_direct_file
         direct, fname, _fsize = await asyncio.to_thread(_uploadnow_direct, url)
         path, _title = await download_direct_file(
-            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag,
+            cancel_event=cancel_event)
         return path, fname
     if kind == "wetransfer":
         from web_download import download_direct_file
         direct = await asyncio.to_thread(_wetransfer_direct, url)
         path, title = await download_direct_file(
-            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag,
+            cancel_event=cancel_event)
         return path, title
     if kind in ("mediafire", "pcloud", "dropbox"):
         # imported here: web_download imports this module lazily, so a
@@ -283,7 +288,8 @@ async def download_filehost(url, tmpdir, progress_cb=None,
             direct = await asyncio.to_thread(
                 _mediafire_direct if kind == "mediafire" else _pcloud_direct, url)
         path, title = await download_direct_file(
-            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag)
+            direct, tmpdir, progress_cb=progress_cb, loop=loop, tag=tag,
+            cancel_event=cancel_event)
         return path, title
     raise FileHostError(
         "unknown", "❌ file host မသိပါ: %s" % (url or "")[:60])

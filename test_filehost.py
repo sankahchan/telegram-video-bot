@@ -53,7 +53,8 @@ def _set_mega(cls):
     sys.modules["mega"] = mod
 
 # ---- stub: web_download (only download_direct_file, for the dispatcher) ----
-async def _fake_ddf(url, tmpdir, progress_cb=None, loop=None, tag="dd"):
+async def _fake_ddf(url, tmpdir, progress_cb=None, loop=None, tag="dd",
+                     **kwargs):
     p = os.path.join(tmpdir, "archive.zip")
     with open(p, "w") as f:
         f.write("x")

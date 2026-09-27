@@ -21,7 +21,8 @@ MEGA_URL = "https://mega" + ".nz/file/AbCdEfGh#key1234567890"
 MF_URL = "https://www.mediafire.com/file/abc123/test.zip/file"
 
 called = {}
-async def fake_fh(url, tmpdir, progress_cb=None, loop=None, tag="dd"):
+async def fake_fh(url, tmpdir, progress_cb=None, loop=None, tag="dd",
+                  **kwargs):
     called["url"] = url
     p = os.path.join(tmpdir, "f.zip")
     with open(p, "w") as f:
@@ -56,7 +57,8 @@ check("probe_size pcloud -> None",
 
 # FileHostError must propagate unwrapped (kind intact) so callers can
 # branch on it — e.g. the night queue skips permanent failures.
-async def fake_fh_boom(url, tmpdir, progress_cb=None, loop=None, tag="dd"):
+async def fake_fh_boom(url, tmpdir, progress_cb=None, loop=None, tag="dd",
+                       **kwargs):
     raise fh.FileHostError("dead", "boom-msg")
 
 fh.download_filehost = fake_fh_boom

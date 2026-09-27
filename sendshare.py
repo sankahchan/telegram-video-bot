@@ -149,13 +149,16 @@ def _record_nonce(nonce_base, seq):
     return prefix + ctr.to_bytes(4, "big")
 
 
-def download_sendshare(url, tmpdir, max_mb=1900, progress_cb=None):
+def download_sendshare(url, tmpdir, max_mb=1900, progress_cb=None,
+                       cancel_event=None):
     """Download a Send-protocol share. Returns (path, filename).
 
     progress_cb(done_bytes, total_bytes) — called from the download thread.
+    cancel_event: threading.Event — aborts with WebDownloadCancelled.
     """
     import httpx
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from web_download import WebDownloadCancelled  # lazy: no cycle
 
     origin, fid, secret = _parse_share_url(url)
     client = httpx.Client(headers={"User-Agent": "Mozilla/5.0"}, timeout=60,
@@ -230,6 +233,9 @@ def download_sendshare(url, tmpdir, max_mb=1900, progress_cb=None):
             done, seq = 0, 0
             with open(path, "wb") as f:
                 while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise WebDownloadCancelled(
+                            WebDownloadCancelled.CANCEL_MSG)
                     rec = _take(rs)
                     if not rec:
                         raise SendShareError(
