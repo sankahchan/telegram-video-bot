@@ -4768,8 +4768,30 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         "started": time.time(), "cancel_event": w_cancel,
                         "kind": "web",
                     }
+                    # v6.11.0: watchdog — yt-dlp extraction reports no
+                    # progress, so show elapsed time instead of a frozen
+                    # "စတင်နေပါတယ်..." while it grinds.
+                    w_t0 = time.time()
+                    w_last = [w_t0]
+
+                    async def _watchdog():
+                        try:
+                            while True:
+                                await asyncio.sleep(20)
+                                if time.time() - w_last[0] >= 20:
+                                    el = int(time.time() - w_t0)
+                                    try:
+                                        await status.edit_text(
+                                            f"{tag} 🔍 ရှာနေပါတယ်… {el}s")
+                                    except Exception:
+                                        pass
+                        except asyncio.CancelledError:
+                            pass
+
+                    wd_task = asyncio.create_task(_watchdog())
                     try:
                         async def _wprog(tag, pct, _tok=w_token):
+                            w_last[0] = time.time()
                             ent = _active_downloads.get(_tok)
                             if ent is not None:
                                 ent["pct"] = pct
@@ -4800,6 +4822,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                     raise
                     finally:
                         _active_downloads.pop(w_token, None)
+                        wd_task.cancel()
                     if w_cancel.is_set():
                         # cancel landed after an uninterruptible download
                         # (e.g. MEGA) finished — discard, don't deliver

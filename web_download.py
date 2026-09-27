@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import time
 
+import httpx
+
 from x_media import XMediaError, extract_x_media, is_x_url
 from tiktok_media import TikTokMediaError, extract_tiktok_media, is_tiktok_url
 from yt_fallback import youtube_fallback_url, FallbackError as _YTFallbackError
@@ -711,6 +713,70 @@ def normalize_web_video(path: str) -> str:
         return path
 
 
+class _NextCandidate(Exception):
+    """Internal: current candidate URL failed, try the next one."""
+
+
+def _is_unsupported_url(e: Exception) -> bool:
+    return "Unsupported URL" in str(e) or "Unsupported" in type(e).__name__
+
+
+# --- v6.11.0: video-host embed fast-path ---------------------------------
+# Blog/streaming pages (e.g. WP video blogs) usually iframe the real video
+# host (streamtape, doodstream, filemoon, ...). yt-dlp's generic page
+# analysis on such pages is slow and often hangs on datacenter IPs; handing
+# yt-dlp the embed URL directly is much faster and more reliable.
+_VIDEO_EMBED_HOSTS = (
+    "streamtape.com", "strtape.cloud",
+    "doodstream.com", "dood.", "d000d.com", "doood.",
+    "filemoon.", "voe.sx",
+    "mixdrop.", "upstream.to", "streamhide.", "guccihide.",
+    "vidoza.", "uqload.", "mp4upload.com", "sendvid.com",
+)
+_EMBED_SCAN_TIMEOUT = 15
+
+
+def _embed_srcs(html: str) -> "list[str]":
+    """Extract known video-host iframe/embed URLs from page HTML."""
+    found: "list[str]" = []
+    for m in re.finditer(
+            r'<(?:iframe|embed|video)[^>]+src=["\']([^"\']+)["\']',
+            html, re.IGNORECASE):
+        src = m.group(1).strip()
+        if src.startswith("//"):
+            src = "https:" + src
+        if not src.startswith("http"):
+            continue
+        host = src.split("/", 3)[2].lower()
+        if any(h in host for h in _VIDEO_EMBED_HOSTS):
+            if src not in found:
+                found.append(src)
+    return found
+
+
+async def _scan_page_embeds(url: str) -> "list[str]":
+    """Fetch a page and return direct video-host embed URLs (may be empty).
+
+    Fast (single GET, 15s cap) and never raises — failures return [].
+    """
+    try:
+        if looks_like_direct_file(url):
+            return []
+        async with httpx.AsyncClient(
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; "
+                                       "Win64; x64) Chrome/126.0"},
+                timeout=_EMBED_SCAN_TIMEOUT,
+                follow_redirects=True) as c:
+            r = await c.get(url)
+            ctype = r.headers.get("content-type", "")
+            if "html" not in ctype:
+                return []
+            return _embed_srcs(r.text)
+    except Exception as e:
+        print(f"⚠️ embed scan failed ({e}) — generic extraction ဆက်မယ်")
+        return []
+
+
 async def download_web(url: str, tmpdir: str, quality: str = "high",
                        audio_only: bool = False, progress_cb=None,
                        loop=None, tag: str = "📥", cancel_event=None):
@@ -808,13 +874,13 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
 
     outtmpl = os.path.join(tmpdir, "%(id)s.%(ext)s")
 
-    def _run(fmt, player_clients):
-        opts = _base_opts(outtmpl, fmt, player_clients, url)
+    def _run(fmt, player_clients, curl):
+        opts = _base_opts(outtmpl, fmt, player_clients, curl)
         if progress_cb and loop:
             opts["progress_hooks"] = [
                 _hook(progress_cb, loop, tag, cancel_event)]
         with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(curl, download=True)
             if not info:
                 raise RuntimeError("video info မရပါ")
             # single video (noplaylist=True) — file is directly available
@@ -829,64 +895,94 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             title = (info.get("title") or "video").strip()
             return path, title
 
+    # v6.11.0: embed fast-path — for non-YouTube pages, resolve video-host
+    # iframes first and hand them to yt-dlp directly. Generic page analysis
+    # on blog/streaming pages is slow and often hangs on datacenter IPs.
+    is_yt = _is_youtube(url)
+    candidates = [url]
+    if not is_yt:
+        embeds = await _scan_page_embeds(url)
+        if embeds:
+            print(f"⚡ embed fast-path: {len(embeds)} host(s) — "
+                  f"{embeds[0][:70]}", flush=True)
+            candidates = embeds + [url]
     # yt-dlp stops at the first client that extracts without error even with
     # zero formats, so try clients as separate full attempts (cheap: no
     # download happens when formats are empty).
     # NOTE: client names must exist in yt-dlp's INNERTUBE_CLIENTS —
     # "tvhtml5" was renamed to "tv"; unknown names are silently skipped!
-    client_variants = [["android"], ["web"], ["ios"], ["tv"],
-                      ["web_embedded"], ["mweb"]]
+    # v6.11.0: player_client is YouTube-only — other sites get ONE attempt,
+    # not 6x the wait on a slow/hanging page.
+    client_variants = ([["android"], ["web"], ["ios"], ["tv"],
+                       ["web_embedded"], ["mweb"]] if is_yt else [None])
     result = None
     last_err: Exception | None = None
     corrupt_n = 0
     botwalled = False  # v6.3.1: YouTube bot-wall -> skip client retries, go fallback
-    for ci, clients in enumerate(client_variants):
-        for i, fmt in enumerate(fmts):
-            try:
-                result = await asyncio.to_thread(_run, fmt, clients)
-                # v5.4.5: verify the file — yt-dlp can exit 0 on a
-                # truncated/corrupt download (frozen frame / lost audio).
-                ok, reason = await asyncio.to_thread(
-                    verify_web_video, result[0])
-                if not ok:
-                    raise _CorruptDownload(reason)
-                if not audio_only:
-                    new_path = await asyncio.to_thread(
-                        normalize_web_video, result[0])
-                    result = (new_path, result[1])
-                break
-            except _CorruptDownload as e:
-                last_err = e
-                corrupt_n += 1
-                try:
-                    if result and os.path.exists(result[0]):
-                        os.remove(result[0])
-                except OSError:
-                    pass
-                result = None
-                if corrupt_n >= 3:
-                    raise RuntimeError(
-                        f"download ဆက်တိုက်ပျက်နေပါတယ် ({e}) — "
-                        f"CDN/network flake ဖြစ်နိုင်ပါတယ်, ခဏနေပြန်စမ်းပါ\n"
-                        f"Download keeps coming back corrupt ({e}) — "
-                        f"possible CDN/network flake, try again later.")
-                print(f"⚠️ [{clients}] corrupt download ({e}) — "
-                      f"retry {corrupt_n}/3")
-                continue
-            except Exception as e:
-                last_err = e
-                if _is_youtube(url) and _is_botwall_error(e):
-                    botwalled = True
-                    print(f"⛔ [{clients}] YouTube bot-wall — fallback chain ဆက်မယ်", flush=True)
+    for cdi, curl in enumerate(candidates):
+        # v6.11.0: honor ❌ between candidates (a blocking yt-dlp call can't
+        # be interrupted mid-flight, but we never start a new one)
+        if cancel_event is not None and cancel_event.is_set():
+            raise WebDownloadCancelled(WebDownloadCancelled.CANCEL_MSG)
+        is_last_candidate = cdi == len(candidates) - 1
+        try:
+            for ci, clients in enumerate(client_variants):
+                for i, fmt in enumerate(fmts):
+                    try:
+                        result = await asyncio.to_thread(_run, fmt, clients, curl)
+                        # v5.4.5: verify the file — yt-dlp can exit 0 on a
+                        # truncated/corrupt download (frozen frame / lost audio).
+                        ok, reason = await asyncio.to_thread(
+                            verify_web_video, result[0])
+                        if not ok:
+                            raise _CorruptDownload(reason)
+                        if not audio_only:
+                            new_path = await asyncio.to_thread(
+                                normalize_web_video, result[0])
+                            result = (new_path, result[1])
+                        break
+                    except _CorruptDownload as e:
+                        last_err = e
+                        corrupt_n += 1
+                        try:
+                            if result and os.path.exists(result[0]):
+                                os.remove(result[0])
+                        except OSError:
+                            pass
+                        result = None
+                        if corrupt_n >= 3:
+                            raise RuntimeError(
+                                f"download ဆက်တိုက်ပျက်နေပါတယ် ({e}) — "
+                                f"CDN/network flake ဖြစ်နိုင်ပါတယ်, ခဏနေပြန်စမ်းပါ\n"
+                                f"Download keeps coming back corrupt ({e}) — "
+                                f"possible CDN/network flake, try again later.")
+                        print(f"⚠️ [{clients}] corrupt download ({e}) — "
+                              f"retry {corrupt_n}/3")
+                        continue
+                    except Exception as e:
+                        last_err = e
+                        if _is_youtube(curl) and _is_botwall_error(e):
+                            botwalled = True
+                            print(f"⛔ [{clients}] YouTube bot-wall — fallback chain ဆက်မယ်", flush=True)
+                            break
+                        # v6.11.0: an embed the extractor can't handle is not
+                        # fatal — try the next candidate (finally the page).
+                        if _is_unsupported_url(e) and not is_last_candidate:
+                            print(f"⚠️ embed unsupported ({str(e)[:60]}) — "
+                                  f"next candidate ဆက်မယ်", flush=True)
+                            raise _NextCandidate()
+                        if not _retryable_yt_error(e):
+                            raise
+                        if i < len(fmts) - 1:
+                            print(f"⚠️ [{clients}] '{fmt}' fail — fallback '{fmts[i+1]}'")
+                            continue
+                        if ci < len(client_variants) - 1:
+                            print(f"⚠️ [{clients}] fail — client {client_variants[ci+1]} retry")
+                        break
+                if result or botwalled:
                     break
-                if not _retryable_yt_error(e):
-                    raise
-                if i < len(fmts) - 1:
-                    print(f"⚠️ [{clients}] '{fmt}' fail — fallback '{fmts[i+1]}'")
-                    continue
-                if ci < len(client_variants) - 1:
-                    print(f"⚠️ [{clients}] fail — client {client_variants[ci+1]} retry")
-                break
+        except _NextCandidate:
+            continue
         if result or botwalled:
             break
     if not result:
