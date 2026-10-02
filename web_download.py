@@ -900,6 +900,86 @@ def _tape_variants(url: str) -> "list[str]":
     return out
 
 
+# --- Bluesky (v6.15.0) -------------------------------------------------------
+# yt-dlp ships a native Bluesky extractor (no login/proxy needed) and it
+# downloads fine — but its failures are cryptic ("Unsupported URL:
+# <external link>", "HTTP Error 400"). A quick public-API check BEFORE
+# yt-dlp fails fast with a clean bilingual message instead. The API needs
+# no auth: https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread
+BSKY_API = "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread"
+
+_BSKY_POST_RE = re.compile(
+    r"bsky\.app/profile/([^/?#]+)/post/([^/?#]+)", re.IGNORECASE)
+
+
+def is_bsky_url(url: str) -> bool:
+    return "bsky.app" in (url or "").lower()
+
+
+class BskyError(Exception):
+    """kind: notfound | novideo | network. message is bilingual (send as-is)."""
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+def _bsky_post_ref(url: str):
+    """bsky.app/profile/<user>/post/<rkey> -> (user, rkey), else None."""
+    m = _BSKY_POST_RE.search(url or "")
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def check_bsky_video(url: str) -> str:
+    """Pre-validate a bsky.app post link. Returns "video" or "unknown"
+    (not a post link, or the API is unreachable — let yt-dlp try).
+    Raises BskyError on definitive failures: notfound (deleted /
+    nonexistent post), novideo (post has no video embed). Bounded: 10s
+    timeout, never stalls the download flow."""
+    ref = _bsky_post_ref(url)
+    if not ref:
+        return "unknown"
+    user, rkey = ref
+    try:
+        r = httpx.get(BSKY_API, params={
+            "depth": 0, "parentHeight": 0,
+            "uri": f"at://{user}/app.bsky.feed.post/{rkey}",
+        }, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception:
+        return "unknown"
+    if r.status_code == 400:
+        try:
+            err = r.json().get("error", "")
+        except Exception:
+            err = ""
+        if err in ("NotFound", "InvalidRequest"):
+            raise BskyError(
+                "notfound",
+                "❌ ဒီ Bluesky post ကို မတွေ့ပါ — ဖျက်လိုက်တာ (သို့) link မှားနေနိုင်ပါတယ်.\n\n"
+                "❌ This Bluesky post was not found — it may be deleted or the link is wrong.")
+        return "unknown"
+    if r.status_code != 200:
+        return "unknown"
+    try:
+        post = r.json().get("thread", {}).get("post", {})
+    except Exception:
+        return "unknown"
+    embed = post.get("embed") or {}
+    etype = embed.get("$type", "")
+    if etype == "app.bsky.embed.video#view":
+        return "video"
+    if etype == "app.bsky.embed.recordWithMedia#view":
+        media = embed.get("media") or {}
+        if media.get("$type") == "app.bsky.embed.video#view":
+            return "video"
+    raise BskyError(
+        "novideo",
+        "❌ ဒီ Bluesky post မှာ video မပါဘူး — text / image / link post ဖြစ်နေပါတယ်.\n\n"
+        "❌ This Bluesky post has no video — it's a text, image, or link post.")
+
+
 async def download_web(url: str, tmpdir: str, quality: str = "high",
                        audio_only: bool = False, progress_cb=None,
                        loop=None, tag: str = "📥", cancel_event=None):
@@ -975,6 +1055,14 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         except TikTokMediaError as e:
             tiktok_error = e
             print(f"⚠️ TikTok cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
+
+    # Bluesky: pre-validate BEFORE yt-dlp (v6.15.0). yt-dlp's native
+    # extractor downloads fine; this only turns its cryptic failures into
+    # clean bilingual errors, fast. BskyError propagates unwrapped so
+    # callers can branch on e.kind (night queue skips permanent ones).
+    # Bounded: the check itself is capped at 10s (never stalls the flow).
+    if is_bsky_url(url):
+        await asyncio.to_thread(check_bsky_video, url)
 
     # File hosts (MEGA / MediaFire / pCloud / Dropbox / WeTransfer / Send /
     # Mega4Upload) BEFORE yt-dlp — yt-dlp has no extractors for them, so they

@@ -61,6 +61,7 @@ from web_download import (  # noqa: E402
     download_direct_file, looks_like_direct_file, direct_file_kind,
     pot_server_hint, storyboard_only, yt_pipeline_status,
     _diagnose_formats, web_info, WebDownloadCancelled,
+    is_bsky_url, BskyError,
 )
 from media_tools import to_mp3, trim_video, compress_video, parse_trim_args, probe_video, ios_remux, ios_container_ok  # noqa: E402
 from filecache import FileIdCache, make_key  # noqa: E402
@@ -895,6 +896,21 @@ def friendly_web_error(e: Exception) -> str | None:
             "TikTok in a desktop browser, export cookies with the \"Get "
             "cookies.txt\" extension, and upload it as cookies_tiktok.txt "
             "(or cookies.txt) under /opt/tg-video-bot/, then resend the link."
+        )
+    # v6.15.0: Bluesky fallback — the pre-check (check_bsky_video) catches
+    # most failures, but if it couldn't reach the API ("unknown") and yt-dlp
+    # then fails, map yt-dlp's raw errors to the same clean messages.
+    if "[Bluesky]" in s:
+        if "400" in s or "404" in s or "NotFound" in s:
+            return (
+                "❌ ဒီ Bluesky post ကို မတွေ့ပါ — ဖျက်လိုက်တာ (သို့) link မှားနေနိုင်ပါတယ်.\n\n"
+                "❌ This Bluesky post was not found — it may be deleted or the link is wrong."
+            )
+        return (
+            "❌ ဒီ Bluesky link ကနေ video ရယူလို့မရပါ — post မှာ video မပါတာ "
+            "(သို့) link ပုံစံမှားနေတာ ဖြစ်နိုင်ပါတယ်.\n\n"
+            "❌ Couldn't get a video from this Bluesky link — the post may have "
+            "no video, or the link format is wrong."
         )
     # v6.13.0: internal errors that already carry a bilingual ❌ message
     # (e.g. blocked-HLS-source) are delivered as-is, no wrapper prefix.
@@ -5043,7 +5059,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 # (RetryAfter), the error message can't be delivered — log
                 # it instead of crashing the handler with a traceback.
                 try:
-                    if isinstance(e, FileHostError):
+                    if isinstance(e, (FileHostError, BskyError)):
                         # bilingual message already — send as-is, no prefix
                         await emsg.reply_text(e.message)
                     else:
@@ -5311,8 +5327,10 @@ async def night_job(context: ContextTypes.DEFAULT_TYPE):
                         pass
                 except Exception as e:
                     print(f"⚠️ night queue item failed: {e}")
-                    if (isinstance(e, FileHostError)
-                            and e.kind in PERMANENT_KINDS):
+                    if ((isinstance(e, FileHostError)
+                            and e.kind in PERMANENT_KINDS)
+                            or (isinstance(e, BskyError)
+                                and e.kind in ("notfound", "novideo"))):
                         # permanent failure (dead link, folder link, no key…)
                         # — tell the user once, don't retry every night
                         # v6.14.2: bound (stalled-MTProto wedge class).
