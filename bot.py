@@ -912,6 +912,11 @@ def friendly_web_error(e: Exception) -> str | None:
             "❌ Couldn't get a video from this Bluesky link — the post may have "
             "no video, or the link format is wrong."
         )
+    # v6.16.0: VK cascade errors already carry a bilingual ❌ message —
+    # strip the VK_MEDIA:<kind>: prefix and deliver as-is.
+    if s.startswith("VK_MEDIA:"):
+        parts = s.split(":", 2)
+        return parts[2] if len(parts) > 2 else None
     # v6.13.0: internal errors that already carry a bilingual ❌ message
     # (e.g. blocked-HLS-source) are delivered as-is, no wrapper prefix.
     if s.startswith("❌"):

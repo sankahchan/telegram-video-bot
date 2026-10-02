@@ -18,6 +18,7 @@ import httpx
 
 from x_media import XMediaError, extract_x_media, is_x_url
 from tiktok_media import TikTokMediaError, extract_tiktok_media, is_tiktok_url
+from vk_media import VkMediaError, extract_vk_media, is_vk_url
 from yt_fallback import youtube_fallback_url, FallbackError as _YTFallbackError
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1056,6 +1057,28 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
             tiktok_error = e
             print(f"⚠️ TikTok cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
 
+    # VK: embed-page cascade BEFORE yt-dlp (v6.16.0). yt-dlp's VK extractor
+    # is frequently broken (IncompleteRead on JSON metadata); the public
+    # embed page (video_ext.php) carries direct mp4 URLs, no login needed.
+    # VPS spike test 2026-10-02: IP not blocked, mp4_144..1080 available.
+    vk_error = None
+    if is_vk_url(url):
+        try:
+            item = await extract_vk_media(url)
+            path, _t = await download_direct_file(
+                item["url"], tmpdir, progress_cb=progress_cb,
+                loop=loop, tag=tag, cancel_event=cancel_event)
+            ok, reason = await asyncio.to_thread(verify_web_video, path)
+            if not ok:
+                raise VkMediaError(
+                    "network", f"VK cascade download corrupt: {reason}")
+            path = await asyncio.to_thread(normalize_web_video, path)
+            title = (item.get("title") or "vk_video").strip() or "vk_video"
+            return path, title
+        except VkMediaError as e:
+            vk_error = e
+            print(f"⚠️ VK cascade failed ({e.kind}) — yt-dlp fallback ဆက်မယ်")
+
     # Bluesky: pre-validate BEFORE yt-dlp (v6.15.0). yt-dlp's native
     # extractor downloads fine; this only turns its cryptic failures into
     # clean bilingual errors, fast. BskyError propagates unwrapped so
@@ -1251,6 +1274,11 @@ async def download_web(url: str, tmpdir: str, quality: str = "high",
         if tiktok_error is not None and tiktok_error.kind in (
                 "not_found", "private", "rate_limited"):
             raise RuntimeError(f"TIKTOK_MEDIA:{tiktok_error.kind}:{tiktok_error}")
+        # VK: same — the embed page verdict beats yt-dlp's generic error
+        # (yt-dlp's VK extractor is frequently broken anyway).
+        if vk_error is not None and vk_error.kind in (
+                "not_found", "blocked", "no_media"):
+            raise RuntimeError(f"VK_MEDIA:{vk_error.kind}:{vk_error.message}")
         # YouTube: yt-dlp is bot-walled on datacenter IPs ("Sign in to
         # confirm you're not a bot" / storyboard-only formats) — try the
         # Cobalt -> Piped -> Invidious fallback chain before giving up.
