@@ -246,68 +246,70 @@ bot_client = PyroClient(
 LINK_RE = re.compile(r"t\.me/(?:c/(\d+)|([A-Za-z0-9_]{5,}))/(\d+)(?:/(\d+))?")
 
 WELCOME = (
-    "👋 Downloader Bot မှ ကြိုဆိုပါတယ်!\n\n"
-    "📌 **Telegram link** (restricted channel/group ရတာတွေအပါအဝင်) —\n"
-    "📌 **Web link** (YouTube / TikTok / Facebook / Instagram / X / PDF / file) —\n"
-    f"တစ်ခါတည်း {MAX_BATCH} ခုအထိ ပို့လို့ရပါတယ်.\n\n"
-    "🎞️ Link ပို့တိုင်း Low / High quality ရွေးခိုင်းမယ် (ဒီတစ်ခါစာပဲ).\n\n"
+    "👋 Downloader Bot မှ ကြိုဆိုပါတယ်! / Welcome to Downloader Bot!\n\n"
+    "📌 **Telegram link** (restricted channel/group ရတာတွေအပါအဝင် / including restricted ones) —\n"
+    "📌 **Web link** (YouTube / TikTok / Facebook / Instagram / X / Bluesky / VK / PDF / file) —\n"
+    f"တစ်ခါတည်း {MAX_BATCH} ခုအထိ ပို့လို့ရပါတယ်. / Send up to {MAX_BATCH} at once.\n\n"
+    "🎞️ Link ပို့တိုင်း Low / High quality ရွေးခိုင်းမယ် (ဒီတစ်ခါစာပဲ).\n"
+    "🎞️ You'll pick Low / High quality for each link (this time only).\n\n"
     "Commands:\n"
-    "/mode [video|file] — ပို့မယ့်ပုံစံ\n"
-    "/quality [high|low] — low = compress (file သေး)\n"
-    "/mp3 [on|off] — audio သက်သက် ထုတ်\n"
-    "/zip [on|off] — batch ကို ZIP တစ်ဖိုင်တည်း\n"
-    "/trim <အစ> <အဆုံး> — video ဖြတ် (ဥပမာ /trim 0:10 0:45)\n"
-    "/find <channel> <စာသား> — channel ထဲ media ရှာ\n"
-    "/watch <channel> — post အသစ် auto-download\n"
+    "/mode [video|file] — ပို့မယ့်ပုံစံ / send mode\n"
+    "/quality [high|low] — low = compress (file သေး / smaller file)\n"
+    "/mp3 [on|off] — audio သက်သက် ထုတ် / extract audio only\n"
+    "/zip [on|off] — batch ကို ZIP တစ်ဖိုင်တည်း / single ZIP\n"
+    "/trim <အစ start> <အဆုံး end> — video ဖြတ် / trim video (ဥပမာ / e.g. /trim 0:10 0:45)\n"
+    "/find <channel> <စာသား text> — channel ထဲ media ရှာ / search channel media\n"
+    "/watch <channel> — post အသစ် auto-download / auto-download new posts\n"
     "/unwatch /watchlist\n"
-    "/follow <rss-url> [name] — series episode အသစ် auto-download\n"
+    "/follow <rss-url> [name] — series episode အသစ် auto-download / new episodes auto-download\n"
     "/unfollow /follows\n"
-    "/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ်\n"
-    "/history — ဒေါင်းခဲ့တာတွေ ပြန်ပို့\n"
-    "/info <link> — မဒေါင်းခင် info ကြိုကြည့်\n"
-    "/bookmark <link> — link သိမ်း\n"
-    "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး (အလွယ်ဆုံး)\n"
-    "/search <text> — torrent အကုန် ရှာ (movie/music/series/software)\n"
-    "/subs <movie> — subtitle (.srt) ရှာ\n"
+    "/tv <series name> — bot ထဲကနေ series ရှာပြီး follow လုပ် / find & follow series in-bot\n"
+    "/history — ဒေါင်းခဲ့တာတွေ ပြန်ပို့ / resend past downloads\n"
+    "/info <link> — မဒေါင်းခင် info ကြိုကြည့် / preview info before downloading\n"
+    "/bookmark <link> — link သိမ်း / save link\n"
+    "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး (အလွယ်ဆုံး) / button menu (easiest)\n"
+    "/search <text> — torrent အကုန် ရှာ (movie/music/series/software) / search all torrents\n"
+    "/subs <movie> — subtitle (.srt) ရှာ / find subtitles\n"
     "/drivestatus — Google Drive upload status\n"
-    "/nightmode [on|off] [နာရီ] — file ကြီးတွေ ညဘက်ဒေါင်း\n"
-    "/save [on|off] — Saved Messages ထဲ auto-save\n"
+    "/nightmode [on|off] [နာရီ hour] — file ကြီးတွေ ညဘက်ဒေါင်း / download big files at night\n"
+    "/save [on|off] — Saved Messages ထဲ auto-save / auto-save to Saved Messages\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — (owner only)\n"
-    "/extend <id> <လ> — user သက်တမ်း တိုး (owner only)\n"
+    "/extend <id> <လ months> — user သက်တမ်း တိုး / extend user (owner only)\n"
     "/admin — 👑 admin panel (owner only)\n"
-    "/xtimeline @user [n] — X profile ရဲ့ latest video တွေ\n"
-    "/clearcache — file_id cache ရှင်း (owner only)\n\n"
-    "📖 အသေးစိတ်: /help <command>  (ဥပမာ /help quality)\n\n"
-    "⚠️ Login ဝင်ထားတဲ့ account က channel/group ရဲ့ member ဖြစ်နေရပါမယ်."
+    "/xtimeline @user [n] — X profile ရဲ့ latest video တွေ / latest videos from an X profile\n"
+    "/clearcache — file_id cache ရှင်း / clear cache (owner only)\n\n"
+    "📖 အသေးစိတ် / Details: /help <command>  (ဥပမာ / e.g. /help quality)\n\n"
+    "⚠️ Login ဝင်ထားတဲ့ account က channel/group ရဲ့ member ဖြစ်နေရပါမယ်.\n"
+    "⚠️ The logged-in account must be a member of the channel/group."
 )
 
 
 # ---------------------------------------------------------------- help
 HELP_OVERVIEW = (
-    "📖 **Command များ**\n"
-    "(အသေးစိတ်: /help <command> — ဥပမာ /help quality)\n\n"
-    "/mode — ပို့မယ့်ပုံစံ (video/file)\n"
-    "/quality — high/low (မူရင်း/compress)\n"
-    "/mp3 — audio ထုတ် on/off\n"
-    "/zip — batch ကို ZIP တစ်ဖိုင်တည်း\n"
+    "📖 **Command များ / Commands**\n"
+    "(အသေးစိတ် / Details: /help <command> — ဥပမာ / e.g. /help quality)\n\n"
+    "/mode — ပို့မယ့်ပုံစံ / send mode (video/file)\n"
+    "/quality — high/low (မူရင်း / original, compress)\n"
+    "/mp3 — audio ထုတ် on/off / extract audio\n"
+    "/zip — batch ကို ZIP တစ်ဖိုင်တည်း / single ZIP\n"
     "/save — Saved Messages auto-save\n"
-    "/nightmode — file ကြီး ညဘက်ဒေါင်း\n"
-    "/trim — video အပိုင်းဖြတ်\n"
-    "/find — channel ထဲ media ရှာ\n"
-    "/watch — post အသစ် auto-download\n"
+    "/nightmode — file ကြီး ညဘက်ဒေါင်း / night download\n"
+    "/trim — video အပိုင်းဖြတ် / trim video\n"
+    "/find — channel ထဲ media ရှာ / search channel\n"
+    "/watch — post အသစ် auto-download / auto-download new posts\n"
     "/unwatch /watchlist\n"
-    "/follow — series RSS, episode အသစ် auto-download\n"
-    "/unfollow /follows — ⬇️ auto ↔ 🔔 notify-only ပြောင်းလို့ရ\n"
-    "/tv — bot ထဲကနေ series ရှာ + follow (website မလို)\n"
+    "/follow — series RSS, episode အသစ် auto-download / new episodes\n"
+    "/unfollow /follows — ⬇️ auto ↔ 🔔 notify-only ပြောင်းလို့ရ / switchable\n"
+    "/tv — bot ထဲကနေ series ရှာ + follow (website မလို) / in-bot search\n"
     "/stream — movie/series streaming download\n"
-    "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး\n"
-    "/search — torrent အကုန် ရှာ + ဒေါင်း\n"
-    "/subs — subtitle (.srt) ရှာ (ဘာသာစကား ရွေး)\n"
-    "/history — ဒေါင်းခဲ့တာတွေ, နှိပ်တာနဲ့ ပြန်ပို့\n"
-    "/info — link info ကြိုကြည့် (မဒေါင်းခင်)\n"
-    "/bookmark — link သိမ်း, /bookmarks — သိမ်းထားတာတွေ\n"
-    "/quota — ကိုယ့် download quota ကြည့်\n"
+    "/menu — 🎛️ ခလုတ်တွေနဲ့ သုံး / button menu\n"
+    "/search — torrent အကုန် ရှာ + ဒေါင်း / search & download\n"
+    "/subs — subtitle (.srt) ရှာ (ဘာသာစကား ရွေး) / choose language\n"
+    "/history — ဒေါင်းခဲ့တာတွေ, နှိပ်တာနဲ့ ပြန်ပို့ / tap to resend\n"
+    "/info — link info ကြိုကြည့် (မဒေါင်းခင်) / preview first\n"
+    "/bookmark — link သိမ်း, /bookmarks — သိမ်းထားတာတွေ / saved links\n"
+    "/quota — ကိုယ့် download quota ကြည့် / my quota\n"
     "/drivestatus — Google Drive upload status\n"
     "/stats — download stats\n"
     "/adduser /deluser /users — owner only\n"
@@ -3427,41 +3429,41 @@ async def subs_pick(q, slug: str):
 
 # ---------------------------------------------------------------- menu (UI/UX)
 BOT_COMMANDS = [
-    ("menu", "🎛️ Menu — ခလုတ်တွေနဲ့ သုံး"),
-    ("search", "🔎 Torrent ရှာ (movie/music/series)"),
-    ("subs", "📝 Subtitle (.srt) ရှာ"),
-    ("tv", "🔍 Series ရှာပြီး follow"),
+    ("menu", "🎛️ Menu — ခလုတ်နဲ့သုံး / Button menu"),
+    ("search", "🔎 Torrent ရှာ / Search torrents"),
+    ("subs", "📝 Subtitle (.srt) ရှာ / Find subtitles"),
+    ("tv", "🔍 Series ရှာ+follow / Find & follow series"),
     ("follow", "📡 Series RSS follow"),
-    ("follows", "📡 Follow list ကြည့်"),
-    ("unfollow", "🚫 Follow ဖြုတ်"),
-    ("mode", "🎬 video/file ပို့ပုံစံ"),
+    ("follows", "📡 Follow list ကြည့် / View follows"),
+    ("unfollow", "🚫 Follow ဖြုတ် / Unfollow"),
+    ("mode", "🎬 video/file ပို့ပုံစံ / Send mode"),
     ("quality", "🎞️ high/low quality"),
-    ("mp3", "🎵 MP3 ထုတ် on/off"),
+    ("mp3", "🎵 MP3 ထုတ် on/off / Extract MP3"),
     ("zip", "📦 ZIP ပေါင်း on/off"),
     ("save", "💾 Saved Messages auto-save"),
-    ("nightmode", "🌙 ညဘက် ဒေါင်း"),
-    ("trim", "✂️ video အပိုင်းဖြတ်"),
-    ("find", "🔍 channel ထဲ media ရှာ"),
-    ("watch", "👁️ channel post အသစ် auto-download"),
+    ("nightmode", "🌙 ညဘက်ဒေါင်း / Night download"),
+    ("trim", "✂️ video အပိုင်းဖြတ် / Trim video"),
+    ("find", "🔍 channel ထဲ media ရှာ / Search channel"),
+    ("watch", "👁️ post အသစ် auto-download / Auto-download new posts"),
     ("watchlist", "👁️ watch list"),
     ("unwatch", "👁️ unwatch"),
-    ("xtimeline", "🐦 X profile video တွေ"),
+    ("xtimeline", "🐦 X profile videos"),
     ("drivestatus", "☁️ Google Drive status"),
     ("stats", "📊 download stats"),
-    ("history", "🕘 ဒေါင်းခဲ့တာတွေ ပြန်ပို့"),
-    ("info", "ℹ️ link info ကြိုကြည့်"),
-    ("bookmark", "🔖 link သိမ်း"),
-    ("bookmarks", "🔖 သိမ်းထားတာတွေ"),
-    ("quota", "📊 ကိုယ့် quota ကြည့်"),
-    ("ytcheck", "▶️ YouTube စစ်"),
+    ("history", "🕘 ဒေါင်းခဲ့တာတွေ / Download history"),
+    ("info", "ℹ️ link info ကြိုကြည့် / Preview link info"),
+    ("bookmark", "🔖 link သိမ်း / Save link"),
+    ("bookmarks", "🔖 သိမ်းထားတာတွေ / Saved links"),
+    ("quota", "📊 ကိုယ့် quota / My quota"),
+    ("ytcheck", "▶️ YouTube စစ် / Check YouTube"),
     ("dl", "📊 active downloads + cancel"),
     ("totorrent", "🧲 magnet → .torrent file"),
     ("setminseeders", "🌱 follow min seeders"),
     ("blacklist", "🏷️ follow blacklist"),
-    ("watchdead", "👀 dead magnet စောင့်ကြည့်"),
-    ("deadwatch", "👀 watch list ကြည့်"),
-    ("unwatchdead", "👀 watch ဖြုတ်"),
-    ("help", "📖 အကူအညီ"),
+    ("watchdead", "👀 dead magnet စောင့် / Watch dead magnets"),
+    ("deadwatch", "👀 watch list ကြည့် / View watch list"),
+    ("unwatchdead", "👀 watch ဖြုတ် / Remove watch"),
+    ("help", "📖 အကူအညီ / Help"),
 ]
 
 
@@ -3480,7 +3482,7 @@ def _menu_kb(uid: int) -> InlineKeyboardMarkup:
     s = st(uid)
     tg = lambda v: "🟢" if v else "⚪"  # noqa: E731
     rows = [
-        [InlineKeyboardButton("🔎 Torrent ရှာ", callback_data="menu:search"),
+        [InlineKeyboardButton("🔎 Torrent Search", callback_data="menu:search"),
          InlineKeyboardButton("🔍 Series follow", callback_data="menu:tv"),
          InlineKeyboardButton("📝 Subs", callback_data="menu:subs")],
         [InlineKeyboardButton("📡 Follows", callback_data="menu:follows"),
@@ -3514,9 +3516,9 @@ _BACK_KB = InlineKeyboardMarkup(
 def _stats_text() -> str:
     s = stats.summary()
     return ("📊 **Download Stats**\n\n"
-            f"📅 ဒီနေ့: {s['day'][0]} ခု, {s['day'][1]} MB\n"
-            f"🗓️ ရက် ၃၀: {s['month'][0]} ခု, {s['month'][1]} MB\n"
-            f"♾️ စုစုပေါင်း: {s['all'][0]} ခု, {s['all'][1]} MB")
+            f"📅 ဒီနေ့ / Today: {s['day'][0]} ခု, {s['day'][1]} MB\n"
+            f"🗓️ ရက် ၃၀ / 30 days: {s['month'][0]} ခု, {s['month'][1]} MB\n"
+            f"♾️ စုစုပေါင်း / Total: {s['all'][0]} ခု, {s['all'][1]} MB")
 
 
 def _follows_text(uid: int) -> str:
@@ -3569,7 +3571,7 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     await update.message.reply_text(
-        "🎛️ **Menu** — လိုတာနှိပ်:",
+        "🎛️ **Menu** — လိုတာနှိပ် / Tap what you need:",
         reply_markup=_menu_kb(update.effective_user.id),
         parse_mode="Markdown")
 
@@ -3579,40 +3581,46 @@ async def menu_cb(q, action: str):
     uid = q.from_user.id
     try:
         if action == "main":
-            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ် / Tap what you need:",
                                       reply_markup=_menu_kb(uid),
                                       parse_mode="Markdown")
         elif action == "mode":
             settings.set(uid, "mode",
                          "file" if st(uid)["mode"] == "video" else "video")
-            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ် / Tap what you need:",
                                       reply_markup=_menu_kb(uid),
                                       parse_mode="Markdown")
         elif action == "quality":
             settings.set(uid, "quality",
                          "low" if st(uid)["quality"] == "high" else "high")
-            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ် / Tap what you need:",
                                       reply_markup=_menu_kb(uid),
                                       parse_mode="Markdown")
         elif action in ("mp3", "zip", "save", "night"):
             settings.set(uid, action, not st(uid)[action])
-            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ်:",
+            await q.edit_message_text("🎛️ **Menu** — လိုတာနှိပ် / Tap what you need:",
                                       reply_markup=_menu_kb(uid),
                                       parse_mode="Markdown")
         elif action == "search":
             await q.edit_message_text(
                 "🔎 ရှာချင်တဲ့စာသား ပို့ပါ:\n`/search <text>`\n"
-                "ဥပမာ: `/search dune part 2 1080p`",
+                "ဥပမာ: `/search dune part 2 1080p`\n\n"
+                "🔎 Send text to search:\n`/search <text>`\n"
+                "Example: `/search dune part 2 1080p`",
                 reply_markup=_BACK_KB, parse_mode="Markdown")
         elif action == "tv":
             await q.edit_message_text(
                 "🔍 Series နာမည် ပို့ပါ:\n`/tv <name>`\n"
-                "ဥပမာ: `/tv Lioness`\nရွေးပြီးရင် episode အသစ် auto-download.",
+                "ဥပမာ: `/tv Lioness`\nရွေးပြီးရင် episode အသစ် auto-download.\n\n"
+                "🔍 Send a series name:\n`/tv <name>`\n"
+                "Example: `/tv Lioness`\nNew episodes auto-download after you pick one.",
                 reply_markup=_BACK_KB, parse_mode="Markdown")
         elif action == "subs":
             await q.edit_message_text(
                 "📝 Movie နာမည် ပို့ပါ:\n`/subs <name>`\n"
-                "ဥပမာ: `/subs dune part two`",
+                "ဥပမာ: `/subs dune part two`\n\n"
+                "📝 Send a movie name:\n`/subs <name>`\n"
+                "Example: `/subs dune part two`",
                 reply_markup=_BACK_KB, parse_mode="Markdown")
         elif action == "follows":
             fkb = _follows_kb(uid)
@@ -3620,7 +3628,8 @@ async def menu_cb(q, action: str):
             rows.append([InlineKeyboardButton("« 🎛️ Menu",
                                               callback_data="menu:main")])
             await q.edit_message_text(
-                _follows_text(uid) + "\n\n_ခလုတ်နှိပ်ပြီး ⬇️ auto ↔ 🔔 notify ပြောင်းပါ_",
+                _follows_text(uid) + "\n\n_ခလုတ်နှိပ်ပြီး ⬇️ auto ↔ 🔔 notify ပြောင်းပါ_\n"
+                "_Tap a button to switch ⬇️ auto ↔ 🔔 notify_",
                 reply_markup=InlineKeyboardMarkup(rows),
                 parse_mode="Markdown")
         elif action == "history":
@@ -3634,7 +3643,8 @@ async def menu_cb(q, action: str):
         elif action == "bookmarks":
             items = bookmarks.list(uid)
             if not items:
-                await q.edit_message_text("🔖 Bookmark မရှိသေးပါ — /bookmark <link> နဲ့ သိမ်းပါ.",
+                await q.edit_message_text("🔖 Bookmark မရှိသေးပါ — /bookmark <link> နဲ့ သိမ်းပါ.\n"
+                                          "🔖 No bookmarks yet — save one with /bookmark <link>.",
                                           reply_markup=_BACK_KB)
             else:
                 bkb = _bookmarks_kb(items)
@@ -3651,8 +3661,9 @@ async def menu_cb(q, action: str):
         elif action == "drive":
             ok = gdrive.is_configured()
             await q.edit_message_text(
-                "☁️ Drive ချိတ်ပြီးပါပြီ ✅" if ok
-                else "☁️ Drive မချိတ်ရသေးပါ — `/drivestatus` မှာ setup ကြည့်.",
+                "☁️ Drive ချိတ်ပြီးပါပြီ ✅\n☁️ Drive is connected ✅" if ok
+                else "☁️ Drive မချိတ်ရသေးပါ — `/drivestatus` မှာ setup ကြည့်.\n"
+                     "☁️ Drive not connected — see setup in `/drivestatus`.",
                 reply_markup=_BACK_KB, parse_mode="Markdown")
         elif action == "help":
             await q.edit_message_text(HELP_OVERVIEW, reply_markup=_BACK_KB,
